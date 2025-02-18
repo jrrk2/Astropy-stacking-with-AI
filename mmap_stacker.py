@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# mmap_stacker.py
 import warnings
 from astropy.wcs import FITSFixedWarning
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
@@ -12,12 +12,130 @@ from astropy.wcs import WCS
 from tqdm import tqdm
 import subprocess
 import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 import platform
+import concurrent.futures
 from colour_demosaicing import demosaicing_CFA_Bayer_bilinear
 from reproject import reproject_interp
+import functools
+import sys
 
-from dark_manager import DarkFrameManager
-from astrometry_core import ensure_mmap_format, IS_APPLE_SILICON
+# Add the current directory to the path so we can import our modules
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from dark_manager import DarkFrameManager
+    from astrometry_core import ensure_mmap_format, IS_APPLE_SILICON
+except ImportError as e:
+    print(f"Error importing required modules: {e}")
+    print("Current path:", os.path.dirname(os.path.abspath(__file__)))
+    print("Python path:", sys.path)
+    raise
+
+def solve_frame(filename):
+    """Solve single frame with astrometry.net"""
+    base = Path(filename).stem
+    solved_file = str(Path(filename).parent / f"{base}_solved.fits")
+    
+    try:
+        cmd = [
+            'solve-field',
+            '-z2',
+            '--continue',
+            '--no-plots',
+            '--new-fits', solved_file,
+            '--overwrite',
+            filename
+        ]
+        
+        result = subprocess.call(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        
+        if result == 0 and os.path.exists(solved_file):
+            return solved_file
+        else:
+            print(f"Error solving {filename}: command failed with exit code {result}")
+            return None
+    
+    except Exception as e:
+        print(f"Exception solving {filename}: {e}")
+        return None
+
+def process_single_frame(filename, ref_wcs, ref_shape, dark_manager):
+    """Process a single frame - standalone function for multiprocessing"""
+    solved_file = solve_frame(filename)
+    if solved_file is None:
+        print(f"Skipping {filename}: could not solve frame")
+        return None
+    
+    try:
+        with fits.open(solved_file, memmap=True) as hdul:
+            data = hdul[0].data
+            header = hdul[0].header
+            
+            # Create a minimal WCS object
+            wcs_keywords = [
+                'WCSAXES', 'CTYPE1', 'CTYPE2', 'EQUINOX',
+                'LONPOLE', 'LATPOLE', 'CRVAL1', 'CRVAL2',
+                'CRPIX1', 'CRPIX2', 'CUNIT1', 'CUNIT2',
+                'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2'
+            ]
+            
+            clean_header = fits.Header()
+            for key in wcs_keywords:
+                if key in header:
+                    clean_header[key] = header[key]
+            
+            wcs = WCS(clean_header)
+            
+            # Get frame properties
+            temp_c = header['TEMP']
+            pattern = header.get('BAYERPAT', 'RGGB').strip()
+            
+            # Get and subtract appropriate dark frame
+            dark_data, dark_msg = dark_manager.get_dark_frame(temp_c, pattern, data)
+            print(f"Frame: {filename} - {dark_msg}")
+            
+            # Subtract dark before demosaicing
+            calibrated_data = data - dark_data
+            
+            # Debayer after dark subtraction
+            rgb = demosaicing_CFA_Bayer_bilinear(calibrated_data, pattern)
+            
+            # Process each channel
+            results = {}
+            for idx, color in enumerate(['R', 'G', 'B']):
+                channel_data = rgb[:,:,idx]
+                
+                # Reproject if needed
+                if ref_wcs is not None:
+                    try:
+                        reprojected, _ = reproject_interp(
+                            (channel_data, wcs),
+                            ref_wcs,
+                            shape_out=ref_shape
+                        )
+                    except Exception as reproj_err:
+                        print(f"Reprojection error for {filename}: {reproj_err}")
+                        continue
+                else:
+                    reprojected = channel_data
+                
+                results[color] = reprojected
+            
+            return results
+            
+    except Exception as e:
+        print(f"Error processing {solved_file}: {str(e)}")
+        return None
+    finally:
+        try:
+            os.remove(solved_file)
+        except FileNotFoundError:
+            pass
 
 class MmapStacker:
     def __init__(self, dark_directory):
@@ -25,111 +143,88 @@ class MmapStacker:
         self.reference_wcs = None
         self.ref_shape = None
         self.dark_manager = DarkFrameManager(dark_directory)
+        self.num_workers = max(1, int(multiprocessing.cpu_count() * 0.75))
+        print(f"Using {self.num_workers} worker processes for frame processing")
 
-    def solve_frame(self, filename):
-        """Solve single frame with astrometry.net"""
-        base = Path(filename).stem
-        
-        # Construct the full path for the solved file
-        solved_file = str(Path(filename).parent / f"{base}.solved.fits")
-        
+    def _initialize_reference(self, filename):
+        """Initialize reference frame from a single file"""
+        solved_file = solve_frame(filename)
+        if solved_file is None:
+            return False
+            
         try:
-            # Construct command as a list for subprocess
-            cmd = [
-                'solve-field',
-                '-z2',              # Downsample by 2
-                '--continue',       # Keep intermediate files
-                '--no-plots',       # Skip plotting
-                '--new-fits', solved_file,
-                '--overwrite',
-                filename
-            ]
-            
-            # Use subprocess.call to run the command
-            result = subprocess.call(
-                cmd, 
-                stdout=subprocess.DEVNULL,  # Suppress stdout
-                stderr=subprocess.DEVNULL   # Suppress stderr
-            )
-            
-            # Check if the command was successful (0 means success)
-            if result == 0 and os.path.exists(solved_file):
-                return solved_file
-            else:
-                print(f"Error solving {filename}: command failed with exit code {result}")
-                return None
-        
+            with fits.open(solved_file) as hdul:
+                data = hdul[0].data
+                header = hdul[0].header
+                
+                ref_keywords = [
+                    'WCSAXES', 'CTYPE1', 'CTYPE2', 'EQUINOX', 
+                    'LONPOLE', 'LATPOLE', 'CRVAL1', 'CRVAL2', 
+                    'CRPIX1', 'CRPIX2', 'CUNIT1', 'CUNIT2', 
+                    'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2'
+                ]
+                clean_ref_header = fits.Header()
+                for key in ref_keywords:
+                    if key in header:
+                        clean_ref_header[key] = header[key]
+                
+                self.reference_wcs = WCS(clean_ref_header)
+                self.ref_shape = data.shape
+                return True
+                
         except Exception as e:
-            print(f"Exception solving {filename}: {e}")
-            return None
+            print(f"Error processing reference frame {solved_file}: {e}")
+            return False
+        finally:
+            try:
+                os.remove(solved_file)
+            except:
+                pass
         
+        return False
+
     def process_files(self, files):
-        """Process all files using memory mapping and parallel processing"""
+        """Process all files using parallel processing"""
         print(f"Processing {len(files)} files...")
         
-        # Initialize reference frame details first
-        reference_file = None
-        
-        # Try to find a successfully solved frame
+        # Initialize reference frame first
         for filename in files:
-            solved_file = self.solve_frame(filename)
-            if solved_file is not None:
-                try:
-                    with fits.open(solved_file) as hdul:
-                        data = hdul[0].data
-                        header = hdul[0].header
-                        
-                        # Create a clean WCS object for the reference frame
-                        ref_keywords = [
-                            'WCSAXES', 'CTYPE1', 'CTYPE2', 'EQUINOX', 
-                            'LONPOLE', 'LATPOLE', 'CRVAL1', 'CRVAL2', 
-                            'CRPIX1', 'CRPIX2', 'CUNIT1', 'CUNIT2', 
-                            'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2'
-                        ]
-                        clean_ref_header = fits.Header()
-                        for key in ref_keywords:
-                            if key in header:
-                                clean_ref_header[key] = header[key]
-                        
-                        self.reference_wcs = WCS(clean_ref_header)
-                        self.ref_shape = data.shape
-                        reference_file = filename
-                        
-                        # Remove the temporary solved file
-                        os.remove(solved_file)
-                        
-                        break
-                except Exception as e:
-                    print(f"Error processing reference frame {solved_file}: {e}")
-                    try:
-                        os.remove(solved_file)
-                    except:
-                        pass
+            if self._initialize_reference(filename):
+                break
         
-        # If no reference frame could be found, raise an error
         if self.reference_wcs is None:
             raise ValueError("Could not find a solvable reference frame")
         
-        # Calculate pixel scale if possible
-        try:
-            if hasattr(self.reference_wcs.wcs, 'cd'):
-                cd = self.reference_wcs.wcs.cd
-                scale = np.sqrt(cd[0,0]**2 + cd[0,1]**2) * 3600.0
-            else:
-                scale = abs(self.reference_wcs.wcs.cdelt[0]) * 3600.0
-            
-            print(f"\nReference pixel scale: {scale:.2f} arcsec/pixel")
-        except Exception:
-            print("\nCould not calculate pixel scale")
+        # Set up the processing function with fixed parameters
+        process_func = functools.partial(
+            process_single_frame,
+            ref_wcs=self.reference_wcs,
+            ref_shape=self.ref_shape,
+            dark_manager=self.dark_manager
+        )
         
-        print(f"Reference image size: {self.ref_shape}")
-        
-        # Process files 
+        # Process files in parallel
         processed_results = []
-        for filename in tqdm(files, desc="Processing frames"):
-            result = self.process_frame(filename)
-            if result is not None:
-                processed_results.append(result)
+        with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(process_func, filename): filename 
+                for filename in files
+            }
+            
+            # Process results as they complete
+            for future in tqdm(
+                concurrent.futures.as_completed(future_to_file),
+                total=len(files),
+                desc="Processing frames"
+            ):
+                filename = future_to_file[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        processed_results.append(result)
+                except Exception as e:
+                    print(f"Error processing {filename}: {str(e)}")
         
         # Compute final averages
         print("\nComputing final averages...")
@@ -139,7 +234,6 @@ class MmapStacker:
             raise ValueError("No frames were successfully processed")
         
         for color in ['R', 'G', 'B']:
-            # Accumulate channel data
             channel_data = np.sum([result[color] for result in processed_results], axis=0)
             averaged = channel_data / float(len(processed_results))
             
@@ -148,79 +242,3 @@ class MmapStacker:
             stacked[color] = averaged
         
         return stacked
-
-    def process_frame(self, filename):
-        """Process a single frame using memory mapping"""
-        # Solve the frame first
-        solved_file = self.solve_frame(filename)
-        if solved_file is None:
-            print(f"Skipping {filename}: could not solve frame")
-            return None
-        
-        try:
-            with fits.open(solved_file, memmap=True) as hdul:
-                data = hdul[0].data
-                header = hdul[0].header
-                
-                # Create a minimal WCS object
-                wcs_keywords = [
-                    'WCSAXES', 'CTYPE1', 'CTYPE2', 'EQUINOX', 
-                    'LONPOLE', 'LATPOLE', 'CRVAL1', 'CRVAL2', 
-                    'CRPIX1', 'CRPIX2', 'CUNIT1', 'CUNIT2', 
-                    'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2'
-                ]
-                
-                # Create a clean header with only WCS-related keywords
-                clean_header = fits.Header()
-                for key in wcs_keywords:
-                    if key in header:
-                        clean_header[key] = header[key]
-                
-                # Create a clean WCS object
-                wcs = WCS(clean_header)
-                
-                # Get frame properties
-                temp_c = header['TEMP']
-                pattern = header.get('BAYERPAT', 'RGGB').strip()
-                
-                # Get and subtract appropriate dark frame
-                dark_data, dark_msg = self.dark_manager.get_dark_frame(temp_c, pattern, data)
-                print(f"Frame: {filename} - {dark_msg}")
-                
-                # Subtract dark before demosaicing
-                calibrated_data = data - dark_data
-                
-                # Debayer after dark subtraction
-                rgb = demosaicing_CFA_Bayer_bilinear(calibrated_data, pattern)
-                
-                # Process each channel
-                results = {}
-                for idx, color in enumerate(['R', 'G', 'B']):
-                    channel_data = rgb[:,:,idx]
-                    
-                    # Reproject if needed
-                    if self.reference_wcs is not None:
-                        try:
-                            reprojected, _ = reproject_interp(
-                                (channel_data, wcs),
-                                self.reference_wcs,
-                                shape_out=self.ref_shape
-                            )
-                        except Exception as reproj_err:
-                            print(f"Reprojection error for {filename}: {reproj_err}")
-                            continue
-                    else:
-                        reprojected = channel_data
-                    
-                    results[color] = reprojected
-                
-                return results
-                
-        except Exception as e:
-            print(f"Error processing {solved_file}: {str(e)}")
-            return None
-        finally:
-            try:
-                os.remove(solved_file)
-            except FileNotFoundError:
-                pass

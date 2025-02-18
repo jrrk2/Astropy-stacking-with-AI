@@ -31,7 +31,10 @@ if IS_APPLE_SILICON:
 def convert_to_mmap(input_file, output_file=None):
     """Convert FITS file to memory-mappable format, handling BZERO/BSCALE"""
     if output_file is None:
-        output_file = str(Path(input_file).parent / f"{Path(input_file).stem}_mmap.fits")
+        # Ensure we use underscores in the output filename
+        input_path = Path(input_file)
+        safe_stem = input_path.stem.replace('-', '_')
+        output_file = str(input_path.parent / f"{safe_stem}_mmap.fits")
         
     try:
         # Read the original file without memory mapping
@@ -55,7 +58,9 @@ def convert_to_mmap(input_file, output_file=None):
 def ensure_mmap_format(filename):
     """Check if file needs conversion to memory-mappable format"""
     path = Path(filename)
-    mmap_file = path.parent / f"{path.stem}_mmap.fits"
+    # Ensure we use underscores in the mmap filename
+    safe_stem = path.stem.replace('-', '_')
+    mmap_file = path.parent / f"{safe_stem}_mmap.fits"
     
     # If mmap version exists, use it
     if mmap_file.exists():
