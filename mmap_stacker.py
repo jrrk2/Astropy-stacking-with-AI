@@ -11,7 +11,6 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from tqdm import tqdm
 import subprocess
-import random
 import multiprocessing
 import platform
 from colour_demosaicing import demosaicing_CFA_Bayer_bilinear
@@ -31,31 +30,39 @@ class MmapStacker:
         """Solve single frame with astrometry.net"""
         base = Path(filename).stem
         
-        cmd = [
-            'solve-field',
-            '-z2',              # Downsample by 2
-            '--continue',       # Keep intermediate files
-            '--no-plots',       # Skip plotting
-            '--new-fits', f'{base}.solved.fits',
-            '--overwrite',
-            filename
-        ]
+        # Construct the full path for the solved file
+        solved_file = str(Path(filename).parent / f"{base}.solved.fits")
         
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            return f'{base}.solved.fits'
-        except subprocess.CalledProcessError as e:
-            print(f"Error solving {filename}:")
-            print(e.stderr.decode())
+            # Construct command as a list for subprocess
+            cmd = [
+                'solve-field',
+                '-z2',              # Downsample by 2
+                '--continue',       # Keep intermediate files
+                '--no-plots',       # Skip plotting
+                '--new-fits', solved_file,
+                '--overwrite',
+                filename
+            ]
+            
+            # Use subprocess.call to run the command
+            result = subprocess.call(
+                cmd, 
+                stdout=subprocess.DEVNULL,  # Suppress stdout
+                stderr=subprocess.DEVNULL   # Suppress stderr
+            )
+            
+            # Check if the command was successful (0 means success)
+            if result == 0 and os.path.exists(solved_file):
+                return solved_file
+            else:
+                print(f"Error solving {filename}: command failed with exit code {result}")
+                return None
+        
+        except Exception as e:
+            print(f"Exception solving {filename}: {e}")
             return None
-        finally:
-            # Cleanup temporary files
-            for ext in ['axy', 'corr', 'xyls', 'match', 'rdls', 'solved', 'wcs']:
-                try:
-                    os.remove(f'{base}.{ext}')
-                except FileNotFoundError:
-                    pass
-
+        
     def process_files(self, files):
         """Process all files using memory mapping and parallel processing"""
         print(f"Processing {len(files)} files...")
@@ -117,7 +124,7 @@ class MmapStacker:
         
         print(f"Reference image size: {self.ref_shape}")
         
-        # Process files
+        # Process files 
         processed_results = []
         for filename in tqdm(files, desc="Processing frames"):
             result = self.process_frame(filename)
