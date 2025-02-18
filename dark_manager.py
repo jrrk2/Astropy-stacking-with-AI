@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import warnings
 from astropy.wcs import FITSFixedWarning
 warnings.filterwarnings('ignore', category=FITSFixedWarning)
@@ -14,6 +15,8 @@ import random
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 import platform
+
+from astrometry_core import ensure_mmap_format
 
 class DarkFrameManager:
     def __init__(self, dark_base_dir):
