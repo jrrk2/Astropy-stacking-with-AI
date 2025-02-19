@@ -41,11 +41,11 @@ def get_catalog_stars(wcs, catalog='apass', mag_limit=16.0):
                 stars.append({
                     'ra': float(row['RAJ2000']),
                     'dec': float(row['DEJ2000']),
-                    'magnitude_B': float(row['Bmag']),
-                    'magnitude_V': float(row['Vmag']),
-                    'magnitude_g': float(row['g_mag']),
-                    'magnitude_r': float(row['r_mag']),
-                    'magnitude_i': float(row['i_mag'])
+                    'magnitude_B': float(row.get('Bmag', np.nan)),
+                    'magnitude_V': float(row.get('Vmag', np.nan)),
+                    'magnitude_g': float(row.get('g_mag', row.get('Gmag', np.nan))),
+                    'magnitude_r': float(row.get('r_mag', row.get('Rmag', np.nan))),
+                    'magnitude_i': float(row.get('i_mag', row.get('Imag', np.nan)))
                 })
             return stars
             

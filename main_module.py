@@ -4,6 +4,7 @@ from arguments_module import parse_arguments
 from astropy.io import fits
 from astrometry_module import solve_astrometry
 from utils_module import find_valid_region
+from utils_module import perform_photometric_calibration
 from image_processing_module import custom_stretch
 from image_processing_module import save_16bit_png
 from image_processing_module import eliminate_background_wavelet
