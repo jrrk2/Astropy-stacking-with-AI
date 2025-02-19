@@ -67,6 +67,9 @@ def main():
     try:
         print(f"Querying {args.catalog} catalog for reference stars...")
         reference_stars = get_catalog_stars(wcs, catalog=args.catalog, mag_limit=args.mag_limit)
+        print("First few star entries:")
+        for star in reference_stars[:5]:
+            print(star)
         
         if reference_stars is None or len(reference_stars) == 0:
             print(f"No suitable reference stars found in {args.catalog} catalog")

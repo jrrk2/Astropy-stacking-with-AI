@@ -90,47 +90,97 @@ def find_valid_region(images):
     
     return y_start, y_end, x_start, x_end
 
-def perform_photometric_calibration(image, wcs, reference_stars):
+def perform_photometric_calibration(images, wcs, reference_stars):
     """
-    Perform photometric calibration using reference stars
+    Analyze potential photometric calibration scaling
+    
+    Parameters:
+    - images: Single image or list of images
+    - wcs: World Coordinate System object
+    - reference_stars: List of reference stars
+    
+    Returns:
+    - Scaling information 
     """
-    # Extract star positions and fluxes
-    star_positions = []
-    star_mags = []
-    measured_fluxes = []
+    # Ensure images is a list
+    if not isinstance(images, list):
+        images = [images]
     
-    for star in reference_stars:
-        # Convert sky coordinates to pixel coordinates
-        coord = SkyCoord(star['ra'], star['dec'], unit=(u.deg, u.deg))
-        x, y = wcs.world_to_pixel(coord)
-        
-        # Extract flux in aperture
-        aperture_radius = 5  # pixels
-        y_int, x_int = int(y), int(x)
-        y_grid, x_grid = np.ogrid[-aperture_radius:aperture_radius+1, 
-                                 -aperture_radius:aperture_radius+1]
-        aperture_mask = x_grid*x_grid + y_grid*y_grid <= aperture_radius*aperture_radius
-        
-        # Measure flux
-        try:
-            flux = np.sum(image[y_int-aperture_radius:y_int+aperture_radius+1,
-                               x_int-aperture_radius:x_int+aperture_radius+1][aperture_mask])
-            if flux > 0:  # Only use valid measurements
-                measured_fluxes.append(flux)
-                star_mags.append(star['magnitude_r'])  # Use r-band magnitude for calibration
-                star_positions.append((x, y))
-        except IndexError:
-            continue
+    # Validate input
+    print(f"Number of images: {len(images)}")
+    for i, img in enumerate(images):
+        print(f"Image {i} shape: {img.shape}")
     
-    # Calculate zero point
-    if len(measured_fluxes) > 0:
-        zero_point = np.median(star_mags + 2.5 * np.log10(measured_fluxes))
+    channel_scalings = []
+    
+    for channel_index, channel_image in enumerate(images):
+        # Extract star positions and fluxes for this channel
+        star_positions = []
+        star_mags = []
+        measured_fluxes = []
         
-        # Apply calibration
-        calibrated_image = image.copy()
-        valid_pixels = calibrated_image > 0
-        calibrated_image[valid_pixels] = zero_point - 2.5 * np.log10(calibrated_image[valid_pixels])
+        for star in reference_stars:
+            # Convert sky coordinates to pixel coordinates
+            coord = SkyCoord(star['ra'], star['dec'], unit=(u.deg, u.deg))
+            x, y = wcs.world_to_pixel(coord)
+            
+            # Extract flux in aperture
+            aperture_radius = 5  # pixels
+            y_int, x_int = int(y), int(x)
+            
+            # Robust bounds checking
+            if (y_int-aperture_radius < 0 or y_int+aperture_radius+1 > channel_image.shape[0] or
+                x_int-aperture_radius < 0 or x_int+aperture_radius+1 > channel_image.shape[1]):
+                continue
+            
+            y_grid, x_grid = np.ogrid[-aperture_radius:aperture_radius+1, 
+                                     -aperture_radius:aperture_radius+1]
+            aperture_mask = x_grid*x_grid + y_grid*y_grid <= aperture_radius*aperture_radius
+            
+            # Measure flux
+            try:
+                flux = np.sum(channel_image[y_int-aperture_radius:y_int+aperture_radius+1,
+                                   x_int-aperture_radius:x_int+aperture_radius+1][aperture_mask])
+                if flux > 0:  # Only use valid measurements
+                    measured_fluxes.append(flux)
+                    star_mags.append(star['magnitude_r'])  # Use r-band magnitude for calibration
+                    star_positions.append((x, y))
+            except IndexError:
+                continue
         
-        return calibrated_image, zero_point
-    else:
-        return image, None
+        # Analyze scaling for this channel
+        if len(measured_fluxes) > 0:
+            # Find the maximum pixel value (brightest point)
+            max_pixel_value = np.max(channel_image)
+            
+            # Calculate zero point using star magnitudes and fluxes
+            log_fluxes = 2.5 * np.log10(measured_fluxes)
+            zero_point = np.median(star_mags + log_fluxes)
+            
+            # Compute scaling factor based on flux measurements
+            flux_scaling = np.percentile(measured_fluxes, 99) / np.max(measured_fluxes)
+            
+            # Prepare scaling information
+            channel_name = ['R', 'G', 'B'][channel_index] if len(images) > 1 else 'Monochrome'
+            scaling_info = {
+                'channel': channel_name,
+                'max_pixel_value': max_pixel_value,
+                'zero_point': zero_point,
+                'flux_scaling': flux_scaling,
+                'num_reference_stars': len(measured_fluxes)
+            }
+            
+            channel_scalings.append(scaling_info)
+            
+            # Print out detailed scaling information
+            print(f"{scaling_info['channel']} Channel Scaling Analysis:")
+            print(f"  Number of reference stars: {scaling_info['num_reference_stars']}")
+            print(f"  Max pixel value: {scaling_info['max_pixel_value']:.2f}")
+            print(f"  Zero point: {scaling_info['zero_point']:.2f}")
+            print(f"  Flux scaling factor: {scaling_info['flux_scaling']:.4f}")
+            print()
+        else:
+            channel_name = ['R', 'G', 'B'][channel_index] if len(images) > 1 else 'Monochrome'
+            print(f"{channel_name} Channel: No valid reference stars found")
+    
+    return images, None
