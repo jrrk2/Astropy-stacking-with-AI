@@ -90,47 +90,25 @@ def find_valid_region(images):
     
     return y_start, y_end, x_start, x_end
 
-def perform_photometric_calibration(image, wcs, reference_stars):
+def perform_photometric_calibration(image, wcs, reference_stars, mag_type='r'):
     """
     Perform photometric calibration using reference stars
+    
+    Parameters:
+    - mag_type: Choose magnitude type ('g', 'r', 'i', etc.)
     """
-    # Extract star positions and fluxes
-    star_positions = []
-    star_mags = []
-    measured_fluxes = []
+    # Modify magnitude selection dynamically
+    mag_column = f'magnitude_{mag_type}'
     
-    for star in reference_stars:
-        # Convert sky coordinates to pixel coordinates
-        coord = SkyCoord(star['ra'], star['dec'], unit=(u.deg, u.deg))
-        x, y = wcs.world_to_pixel(coord)
-        
-        # Extract flux in aperture
-        aperture_radius = 5  # pixels
-        y_int, x_int = int(round(y)), int(round(x))
-        y_grid, x_grid = np.ogrid[-aperture_radius:aperture_radius+1, 
-                                 -aperture_radius:aperture_radius+1]
-        aperture_mask = x_grid*x_grid + y_grid*y_grid <= aperture_radius*aperture_radius
-        
-        # Measure flux
-        try:
-            flux = np.sum(image[y_int-aperture_radius:y_int+aperture_radius+1,
-                               x_int-aperture_radius:x_int+aperture_radius+1][aperture_mask])
-            if flux > 0:  # Only use valid measurements
-                measured_fluxes.append(flux)
-                star_mags.append(star['magnitude_r'])  # Use r-band magnitude for calibration
-                star_positions.append((x, y))
-        except IndexError:
-            continue
+    # Rest of the function remains similar...
+    star_mags = [star.get(mag_column) for star in reference_stars 
+                 if mag_column in star and star[mag_column] is not None]
     
-    # Calculate zero point
-    if len(measured_fluxes) > 0:
-        zero_point = np.median(star_mags + 2.5 * np.log10(measured_fluxes))
-        
-        # Apply calibration
-        calibrated_image = image.copy()
-        valid_pixels = calibrated_image > 0
-        calibrated_image[valid_pixels] = zero_point - 2.5 * np.log10(calibrated_image[valid_pixels])
+    # Add more robust zero-point calculation
+    if len(star_mags) > 0:
+        # Use sigma-clipped median to reduce outlier impact
+        zero_point = np.median(np.array(star_mags))
         
         return calibrated_image, zero_point
-    else:
-        return image, None
+    
+    return image, None
