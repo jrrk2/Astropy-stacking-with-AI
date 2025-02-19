@@ -77,9 +77,7 @@ def main():
             print(f"Found {len(reference_stars)} reference stars")
             
             # Calibrate each channel
-            r_calibrated, r_zp = perform_photometric_calibration(r_stretched, wcs, reference_stars)
-            g_calibrated, g_zp = perform_photometric_calibration(g_stretched, wcs, reference_stars)
-            b_calibrated, b_zp = perform_photometric_calibration(b_stretched, wcs, reference_stars)
+            [r_calibrated, g_calibrated, b_calibrated], zp = perform_photometric_calibration([r_stretched,g_stretched,b_stretched], wcs, reference_stars)
             
             if all(zp is not None for zp in [r_zp, g_zp, b_zp]):
                 print(f"Zero points - R: {r_zp:.2f}, G: {g_zp:.2f}, B: {b_zp:.2f}")
