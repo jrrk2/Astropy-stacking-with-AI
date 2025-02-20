@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from astropy.wcs import WCS
 from arguments_module import parse_arguments
@@ -12,6 +13,12 @@ from catalog_module import get_catalog_stars
 
 def main():
     args = parse_arguments()
+
+    # Add input file validation
+    for filename in ['stacked_r.fits', 'stacked_g.fits', 'stacked_b.fits']:
+        if not os.path.exists(filename):
+            print(f"Error: Required input file {filename} not found")
+            return
     
     # Read the individual stacks with WCS information
     r_hdu = fits.open('stacked_r.fits')[0]
@@ -76,14 +83,24 @@ def main():
         else:
             print(f"Found {len(reference_stars)} reference stars")
             
-            # Calibrate each channel
-            [r_calibrated, g_calibrated, b_calibrated], zp = perform_photometric_calibration([r_stretched,g_stretched,b_stretched], wcs, reference_stars)
-            
-            if all(zp is not None for zp in [r_zp, g_zp, b_zp]):
-                print(f"Zero points - R: {r_zp:.2f}, G: {g_zp:.2f}, B: {b_zp:.2f}")
-                r_stretched, g_stretched, b_stretched = r_calibrated, g_calibrated, b_calibrated
-            else:
-                print("Warning: Photometric calibration failed for one or more channels")
+            # Before the photometric calibration block, add:
+            r_zp, g_zp, b_zp = None, None, None
+
+            # Replace the calibration block with:
+            [r_calibrated, g_calibrated, b_calibrated], zero_points = perform_photometric_calibration(
+                [r_stretched, g_stretched, b_stretched], 
+                wcs, 
+                reference_stars
+            )
+
+            if zero_points is not None:
+                r_zp, g_zp, b_zp = zero_points
+                if all(zp is not None for zp in [r_zp, g_zp, b_zp]):
+                    print(f"Zero points - R: {r_zp:.2f}, G: {g_zp:.2f}, B: {b_zp:.2f}")
+                    r_stretched, g_stretched, b_stretched = r_calibrated, g_calibrated, b_calibrated
+                else:
+                    print("Warning: Photometric calibration failed for one or more channels")
+
     except Exception as e:
         print(f"Error during photometric calibration: {str(e)}")
     

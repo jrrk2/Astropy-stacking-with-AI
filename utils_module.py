@@ -183,4 +183,7 @@ def perform_photometric_calibration(images, wcs, reference_stars):
             channel_name = ['R', 'G', 'B'][channel_index] if len(images) > 1 else 'Monochrome'
             print(f"{channel_name} Channel: No valid reference stars found")
     
+    if len(channel_scalings) == len(images):
+        zero_points = [scaling['zero_point'] for scaling in channel_scalings]
+        return images, zero_points
     return images, None

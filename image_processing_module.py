@@ -1,17 +1,19 @@
 import os
 import cv2
 import numpy as np
+from numpy import ma
 
 def custom_stretch(image, black_point=0.1, white_point=0.999, gamma=0.5):
     """
-    Apply a custom stretch with histogram equalization
+    Apply a custom stretch with histogram equalization using masked arrays
     """
-    valid_data = image[~np.isnan(image)]
+    masked_image = ma.masked_invalid(image)
+    valid_data = masked_image.compressed()
     black = np.percentile(valid_data, black_point * 100)
     white = np.percentile(valid_data, white_point * 100)
-    stretched = np.clip((image - black) / (white - black), 0, 1)
-    stretched = np.power(stretched, gamma)
-    return stretched
+    stretched = ma.clip((masked_image - black) / (white - black), 0, 1)
+    stretched = ma.power(stretched, gamma)
+    return stretched.filled(0)  # Fill masked values with 0
 
 def raised_cosine_taper_2d(shape, taper_width_percent=10):
     """
@@ -76,7 +78,7 @@ def eliminate_background_wavelet(image, levels=3, taper_width_percent=10, debug_
     
     return image - tapered_background
 
-def save_16bit_png(data, filename, max_size_mb=20, max_trim_percent=0.10):
+def save_16bit_png(data, filename, max_size_mb=25, max_trim_percent=0.10):
     """
     Save a normalized 16-bit PNG, automatically reducing size if needed
     """

@@ -15,10 +15,10 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 import platform
 import concurrent.futures
-from colour_demosaicing import demosaicing_CFA_Bayer_bilinear
 from reproject import reproject_interp
 import functools
 import sys
+import psutil
 
 # Add the current directory to the path so we can import our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +31,11 @@ except ImportError as e:
     print("Current path:", os.path.dirname(os.path.abspath(__file__)))
     print("Python path:", sys.path)
     raise
+
+def log_memory_usage(label=""):
+    """Log current memory usage"""
+    process = psutil.Process(os.getpid())
+    print(f"Memory usage {label}: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
 def solve_frame(filename):
     """Solve single frame with astrometry.net"""
@@ -65,13 +70,15 @@ def solve_frame(filename):
         return None
 
 def process_single_frame(filename, ref_wcs, ref_shape, dark_manager):
-    """Process a single frame - standalone function for multiprocessing"""
+    """Process a single frame - optimized for memory usage"""
+    log_memory_usage(f"Start processing {filename}")
+    
     solved_file = solve_frame(filename)
     if solved_file is None:
-        print(f"Skipping {filename}: could not solve frame")
         return None
     
     try:
+        results = {}
         with fits.open(solved_file, memmap=True) as hdul:
             data = hdul[0].data
             header = hdul[0].header
@@ -95,20 +102,26 @@ def process_single_frame(filename, ref_wcs, ref_shape, dark_manager):
             temp_c = header['TEMP']
             pattern = header.get('BAYERPAT', 'RGGB').strip()
             
-            # Get and subtract appropriate dark frame
+            # Get dark frame
             dark_data, dark_msg = dark_manager.get_dark_frame(temp_c, pattern, data)
             print(f"Frame: {filename} - {dark_msg}")
             
-            # Subtract dark before demosaicing
-            calibrated_data = data - dark_data
+            log_memory_usage("Before channel processing")
             
-            # Debayer after dark subtraction
-            rgb = demosaicing_CFA_Bayer_bilinear(calibrated_data, pattern)
-            
-            # Process each channel
-            results = {}
+            # Process one channel at a time
             for idx, color in enumerate(['R', 'G', 'B']):
-                channel_data = rgb[:,:,idx]
+                # Extract single channel before debayering
+                channel_mask = np.zeros_like(data, dtype=bool)
+                if color == 'R':
+                    channel_mask[::2, ::2] = True
+                elif color == 'B':
+                    channel_mask[1::2, 1::2] = True
+                else:  # Green
+                    channel_mask[::2, 1::2] = True
+                    channel_mask[1::2, ::2] = True
+                
+                # Process only this channel
+                channel_data = np.where(channel_mask, data - dark_data, 0)
                 
                 # Reproject if needed
                 if ref_wcs is not None:
@@ -125,6 +138,12 @@ def process_single_frame(filename, ref_wcs, ref_shape, dark_manager):
                     reprojected = channel_data
                 
                 results[color] = reprojected
+                
+                # Force cleanup
+                del channel_data
+                del reprojected
+                
+                log_memory_usage(f"After processing {color} channel")
             
             return results
             
@@ -143,7 +162,7 @@ class MmapStacker:
         self.reference_wcs = None
         self.ref_shape = None
         self.dark_manager = DarkFrameManager(dark_directory)
-        self.num_workers = max(1, int(multiprocessing.cpu_count() * 0.75))
+        self.num_workers = max(1, min(int(multiprocessing.cpu_count() * 0.5), 4))  # Reduced worker count
         print(f"Using {self.num_workers} worker processes for frame processing")
 
     def _initialize_reference(self, filename):
@@ -184,8 +203,9 @@ class MmapStacker:
         return False
 
     def process_files(self, files):
-        """Process all files using parallel processing"""
+        """Process all files using parallel processing with memory optimization"""
         print(f"Processing {len(files)} files...")
+        log_memory_usage("Start of processing")
         
         # Initialize reference frame first
         for filename in files:
@@ -195,50 +215,57 @@ class MmapStacker:
         if self.reference_wcs is None:
             raise ValueError("Could not find a solvable reference frame")
         
-        # Set up the processing function with fixed parameters
-        process_func = functools.partial(
-            process_single_frame,
-            ref_wcs=self.reference_wcs,
-            ref_shape=self.ref_shape,
-            dark_manager=self.dark_manager
-        )
+        # Initialize accumulator files
+        for color in ['R', 'G', 'B']:
+            temp_array = np.zeros(self.ref_shape, dtype=np.float32)
+            fits.writeto(f'accum_{color.lower()}.fits', temp_array, overwrite=True)
         
-        # Process files in parallel
-        processed_results = []
-        with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
-            # Submit all tasks
-            future_to_file = {
-                executor.submit(process_func, filename): filename 
-                for filename in files
-            }
+        # Process files in smaller batches
+        batch_size = min(10, len(files))
+        processed_count = 0
+        
+        for i in range(0, len(files), batch_size):
+            batch_files = files[i:i + batch_size]
             
-            # Process results as they complete
-            for future in tqdm(
-                concurrent.futures.as_completed(future_to_file),
-                total=len(files),
-                desc="Processing frames"
-            ):
-                filename = future_to_file[future]
-                try:
-                    result = future.result()
-                    if result is not None:
-                        processed_results.append(result)
-                except Exception as e:
-                    print(f"Error processing {filename}: {str(e)}")
+            log_memory_usage(f"Start of batch {i//batch_size + 1}")
+            
+            # Process batch
+            with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
+                future_to_file = {
+                    executor.submit(process_single_frame, filename, 
+                                  self.reference_wcs, self.ref_shape, 
+                                  self.dark_manager): filename 
+                    for filename in batch_files
+                }
+                
+                for future in tqdm(
+                    concurrent.futures.as_completed(future_to_file),
+                    total=len(batch_files),
+                    desc=f"Processing batch {i//batch_size + 1}"
+                ):
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            processed_count += 1
+                            # Update accumulator files
+                            for color in ['R', 'G', 'B']:
+                                with fits.open(f'accum_{color.lower()}.fits', mode='update') as hdul:
+                                    hdul[0].data += result[color]
+                    except Exception as e:
+                        print(f"Error in batch processing: {str(e)}")
+            
+            log_memory_usage(f"End of batch {i//batch_size + 1}")
         
         # Compute final averages
-        print("\nComputing final averages...")
-        stacked = {}
-        
-        if not processed_results:
+        if processed_count == 0:
             raise ValueError("No frames were successfully processed")
-        
-        for color in ['R', 'G', 'B']:
-            channel_data = np.sum([result[color] for result in processed_results], axis=0)
-            averaged = channel_data / float(len(processed_results))
             
-            fits.writeto(f'stacked_{color.lower()}.fits', averaged, overwrite=True)
+        print(f"\nComputing final averages from {processed_count} frames...")
+        for color in ['R', 'G', 'B']:
+            with fits.open(f'accum_{color.lower()}.fits') as hdul:
+                averaged = hdul[0].data / float(processed_count)
+                fits.writeto(f'stacked_{color.lower()}.fits', averaged, overwrite=True)
+            os.remove(f'accum_{color.lower()}.fits')
             print(f"Saved stacked_{color.lower()}.fits")
-            stacked[color] = averaged
-        
-        return stacked
+            
+        log_memory_usage("End of processing")
