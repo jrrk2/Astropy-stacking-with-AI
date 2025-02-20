@@ -1,3 +1,6 @@
 *.fits
 __pycache__/
 *~
+*.xyls
+*.png
+lights/

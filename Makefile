@@ -28,6 +28,7 @@ check_venv:
 # Clean outputs and temporary files
 clean:
 	rm -rf venv
+	rm -rf __pycache__
 	rm -f stacked_*.fits
 	rm -f *_solved.fits
 	rm -f accum_*.fits
@@ -47,12 +48,13 @@ clean:
 	rm -f *_mmap.rdls
 	rm -f *_mmap.solved
 	rm -f *_mmap.wcs
+	rm -f *_mmap.fits
 	rm -f stacked_g-indx.xyls
 	rm -f *~
 
 # Initial stacking step
 stack: check_venv
-	$(PYTHON) main_script.py 'img-0???r.fits' --dark-dir $(DARK_DIR)
+	$(PYTHON) main_script.py 'lights/img-0???r.fits' --dark-dir $(DARK_DIR)
 
 # Final processing step
 finish: check_venv
