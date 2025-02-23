@@ -55,17 +55,22 @@ def convert_to_mmap(input_file, output_file=None):
         print(f"Error converting {input_file} to memory-mappable format: {str(e)}")
         return None
 
-def ensure_mmap_format(filename):
-    """Check if file needs conversion to memory-mappable format"""
+def ensure_mmap_format(filename, mmap_dir='mmap'):
+    """Check if file needs conversion to memory-mappable format and store in mmap directory"""
     path = Path(filename)
+    
+    # Create mmap directory if it doesn't exist
+    mmap_path = Path(mmap_dir)
+    mmap_path.mkdir(exist_ok=True)
+    
     # Ensure we use underscores in the mmap filename
     safe_stem = path.stem.replace('-', '_')
-    mmap_file = path.parent / f"{safe_stem}_mmap.fits"
+    mmap_file = mmap_path / f"{safe_stem}_mmap.fits"
     
     # If mmap version exists, use it
     if mmap_file.exists():
         try:
-            with fits.open(mmap_file, memmap=True) as hdul:
+            with fits.open(str(mmap_file), memmap=True) as hdul:
                 _ = hdul[0].data
             return str(mmap_file)
         except Exception:
@@ -78,4 +83,21 @@ def ensure_mmap_format(filename):
         return filename
     except Exception:
         print(f"Converting {filename} to memory-mappable format...")
-        return convert_to_mmap(filename)
+        try:
+            # Read the original file without memory mapping
+            with fits.open(filename, memmap=False) as hdul:
+                # Get the data and apply any BZERO/BSCALE scaling
+                data = hdul[0].data.astype(np.float32)
+                header = hdul[0].header.copy()
+                
+                # Remove scaling keywords as they're now applied
+                for keyword in ['BZERO', 'BSCALE', 'BLANK']:
+                    if keyword in header:
+                        del header[keyword]
+                
+            # Write in memory-mappable format to mmap directory
+            fits.writeto(mmap_file, data, header, overwrite=True)
+            return str(mmap_file)
+        except Exception as e:
+            print(f"Error converting {filename} to memory-mappable format: {str(e)}")
+            return None

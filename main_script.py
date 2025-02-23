@@ -26,6 +26,7 @@ def main():
     parser = argparse.ArgumentParser(description='Stack frames using memory-mapped processing')
     parser.add_argument('pattern', help='Input file pattern (e.g., "img-*.fits")')
     parser.add_argument('--dark-dir', required=True, help='Directory containing master dark frames')
+    parser.add_argument('--mmap-dir', default='mmap', help='Directory for memory-mapped files')
     parser.add_argument('--max-dark-frames', type=int, default=256, 
                        help='Maximum number of dark frames to stack per temperature')
     
@@ -39,10 +40,14 @@ def main():
     
     print(f"Found {len(files)} files to process")
     
+    # Create mmap directory if it doesn't exist
+    mmap_dir = Path(args.mmap_dir)
+    mmap_dir.mkdir(exist_ok=True)
+    
     # Ensure all files are in memory-mappable format
     mmap_files = []
     for file in tqdm(files, desc="Checking/converting files"):
-        mmap_file = ensure_mmap_format(file)
+        mmap_file = ensure_mmap_format(file, args.mmap_dir)
         if mmap_file:
             mmap_files.append(mmap_file)
         else:
@@ -53,6 +58,7 @@ def main():
         exit(1)
         
     print(f"Processing {len(mmap_files)} valid files")
+    print(f"Memory-mapped files stored in: {args.mmap_dir}/")
     
     stacker = MmapStacker(args.dark_dir)
     stacker.process_files(mmap_files)

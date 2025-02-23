@@ -28,6 +28,7 @@ check_venv:
 # Clean outputs and temporary files
 clean:
 	rm -rf venv
+	rm -rf mmap
 	rm -rf __pycache__
 	rm -f stacked_*.fits
 	rm -f *_solved.fits
@@ -41,20 +42,24 @@ clean:
 	rm -f */corrections.tbl
 	rm -f */mosaic.tbl
 	rm -f */symlinks.stamp
-	rm -f *_mmap-indx.xyls
-	rm -f *_mmap.axy
-	rm -f *_mmap.corr
-	rm -f *_mmap.match
-	rm -f *_mmap.rdls
-	rm -f *_mmap.solved
-	rm -f *_mmap.wcs
-	rm -f *_mmap.fits
+	rm -f lights/*_mmap-indx.xyls
+	rm -f lights/*_mmap.axy
+	rm -f lights/*_mmap.corr
+	rm -f lights/*_mmap.match
+	rm -f lights/*_mmap.rdls
+	rm -f lights/*_mmap.solved
+	rm -f lights/*_mmap.wcs
+	rm -f lights/*_mmap.fits
 	rm -f stacked_g-indx.xyls
 	rm -f *~
 
 # Initial stacking step
 stack: check_venv
-	$(PYTHON) main_script.py 'lights/img-0???r.fits' --dark-dir $(DARK_DIR)
+	$(PYTHON) main_script.py 'lights/light_*.fits' --dark-dir $(DARK_DIR)
+
+# Initial stacking step
+quick: check_venv
+	$(PYTHON) main_script.py 'lights/light_20220314_20*.fits' --dark-dir $(DARK_DIR)
 
 # Final processing step
 finish: check_venv
