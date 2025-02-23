@@ -30,76 +30,89 @@ def log_memory_usage(label=""):
     process = psutil.Process(os.getpid())
     print(f"Memory usage {label}: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
-def solve_frame(filename, timeout=300):  # 5 minute timeout
-    """
-    Solve single frame with astrometry.net
-    Args:
-        filename: Path to FITS file
-        timeout: Timeout in seconds (default 5 minutes)
-    """
-    base = Path(filename).stem
-    solved_file = str(Path(filename).parent / f"{base}_solved.fits")
-    
-    try:
-        cmd = [
-            'solve-field',
-            '-z2',
-            '--continue',
-            '--no-plots',
-            '--new-fits', solved_file,
-            '--overwrite',
-            filename
-        ]
-        
-        # Use Popen to get process handle for killing if needed
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid  # Create new process group
-        )
-        
-        try:
-            process.wait(timeout=timeout)
-            if process.returncode == 0 and os.path.exists(solved_file):
-                return solved_file
-            else:
-                print(f"Error solving {filename}: command failed with exit code {process.returncode}")
-                return None
-                
-        except subprocess.TimeoutExpired:
-            # Kill the entire process group
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            process.wait()  # Ensure process is terminated
-            print(f"Timeout ({timeout}s) expired while solving {filename}")
-            return None
-            
-    except Exception as e:
-        print(f"Exception solving {filename}: {e}")
-        return None
-    finally:
-        # Clean up any temporary files that might have been created
-        for ext in ['.axy', '.corr', '.match', '.rdls', '.solved', '.wcs']:
-            temp_file = str(Path(filename).parent / f"{base}{ext}")
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except:
-                pass
-
 class MmapStacker:
     def __init__(self, dark_directory):
         """Initialize stacker with dark frame manager"""
         self.reference_wcs = None
         self.ref_shape = None
+        self.ref_ra = None    # Store reference RA
+        self.ref_dec = None   # Store reference Dec
         self.dark_manager = DarkFrameManager(dark_directory)
         self.num_workers = max(1, min(int(multiprocessing.cpu_count() * 0.5), 4))
         self.hot_pixels = None  # Will store detected hot pixels
         print(f"Using {self.num_workers} worker processes for frame processing")
 
+    def solve_frame(self, filename, timeout=300):
+        """Solve frame with restricted search area if we have a reference position"""
+        base = Path(filename).stem
+        solved_file = str(Path(filename).parent / f"{base}_solved.fits")
+
+        try:
+            cmd = [
+                'solve-field',
+                '--scale-units', 'arcsecperpix',
+                '--scale-low', '1.1',
+                '--scale-high', '1.3',
+                '--downsample', '2',
+                '--no-plots',
+                '--no-verify',
+                '--new-fits', solved_file,
+                '--overwrite',
+                '--cpulimit', '120'
+            ]
+
+            # Add search radius restrictions if we have a reference position
+            if self.ref_ra is not None and self.ref_dec is not None:
+                cmd.extend([
+                    '--ra', str(self.ref_ra),
+                    '--dec', str(self.ref_dec),
+                    '--radius', '1.0'  # 1 degree search radius
+                ])
+
+            cmd.append(filename)
+
+            with subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, 
+                                start_new_session=True) as process:
+                try:
+                    process.wait(timeout=timeout)
+                    if process.returncode == 0 and os.path.exists(solved_file):
+                        # If this is our first successful solve, store the reference position
+                        if self.ref_ra is None:
+                            with fits.open(solved_file) as hdul:
+                                wcs = WCS(hdul[0].header)
+                                center = wcs.wcs.crval
+                                self.ref_ra = center[0]
+                                self.ref_dec = center[1]
+                                print(f"Set reference position to RA={self.ref_ra:.3f}, Dec={self.ref_dec:.3f}")
+                        return solved_file
+                    return None
+                except subprocess.TimeoutExpired:
+                    print(f"Terminating solve-field process for {filename} after {timeout}s timeout")
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                    try:
+                        # Give it a second to terminate gracefully
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        # If it doesn't terminate gracefully, kill it
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    return None
+
+        except Exception as e:
+            print(f"Error solving {filename}: {e}")
+            return None
+        finally:
+            # Clean up temporary files
+            for ext in ['.axy', '.corr', '.match', '.rdls', '.solved', '.wcs']:
+                temp_file = str(Path(filename).parent / f"{base}{ext}")
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except:
+                    pass
+
     def _initialize_reference(self, filename):
         """Initialize reference frame from a single file"""
-        solved_file = solve_frame(filename)
+        solved_file = self.solve_frame(filename)
         if solved_file is None:
             return False
             
@@ -191,7 +204,7 @@ class MmapStacker:
         """Process a single frame with hot pixel removal"""
         log_memory_usage(f"Start processing {filename}")
         
-        solved_file = solve_frame(filename)
+        solved_file = self.solve_frame(filename)
         if solved_file is None:
             return None
         

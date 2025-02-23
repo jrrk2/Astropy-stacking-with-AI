@@ -1,6 +1,8 @@
+.DS_Store
 *.fits
 __pycache__/
 *~
 *.xyls
 *.png
 lights/
+venv/

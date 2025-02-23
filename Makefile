@@ -1,7 +1,7 @@
 # Makefile for astrophotography processing pipeline
 
 # Configuration
-DARK_DIR = /Users/jonathan/stellina-5df04c/expert-mode/dark_temps
+DARK_DIR = /home/jonathan/dark_temps
 VENV_DIR = venv
 PYTHON = $(VENV_DIR)/bin/python
 PIP = $(VENV_DIR)/bin/pip
