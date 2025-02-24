@@ -4,13 +4,14 @@ import astropy.units as u
 from astropy.io import fits
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
-from astropy.stats import sigma_clipped_stats
+from astropy.stats import sigma_clipped_stats, SigmaClip
 from astropy.wcs import WCS
 from photutils.detection import DAOStarFinder
 from photutils.background import Background2D, MedianBackground
 import logging
 from pathlib import Path
 import argparse
+from scipy.stats import pearsonr
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
@@ -20,12 +21,6 @@ logger = logging.getLogger(__name__)
 def extract_sources(fits_file: str) -> Table | None:
     """
     Extract sources from the image using photutils.
-    
-    Args:
-        fits_file: Path to the FITS file
-        
-    Returns:
-        astropy.table.Table: Table of extracted sources or None if extraction fails
     """
     try:
         if not os.path.exists(fits_file):
@@ -69,36 +64,66 @@ def extract_sources(fits_file: str) -> Table | None:
                 logger.error(f"Error parsing WCS: {str(e)}")
                 return None
         
-        # Estimate background
+        # Estimate background - first with sigma_clip as a SigmaClip object, fall back to float if needed
         try:
-            sigma_clip = 3.0
+            sigma_clip = SigmaClip(sigma=3.0)
             bkg_estimator = MedianBackground()
             bkg = Background2D(data, (50, 50), filter_size=(3, 3),
                               sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
             data_sub = data - bkg.background
             threshold = 5.0 * bkg.background_rms.mean()
         except Exception as e:
-            logger.warning(f"Error estimating background: {str(e)}. Using simple statistics.")
-            mean, median, std = sigma_clipped_stats(data, sigma=3.0)
-            data_sub = data - median
-            threshold = 5.0 * std
+            logger.warning(f"Error with SigmaClip approach: {str(e)}. Trying simple statistics.")
+            try:
+                # Try with float sigma_clip as in original code
+                bkg = Background2D(data, (50, 50), filter_size=(3, 3),
+                                  sigma_clip=3.0, bkg_estimator=MedianBackground())
+                data_sub = data - bkg.background
+                threshold = 5.0 * bkg.background_rms.mean()
+            except Exception as e2:
+                logger.warning(f"Error estimating background: {str(e2)}. Using sigma_clipped_stats.")
+                mean, median, std = sigma_clipped_stats(data, sigma=3.0)
+                data_sub = data - median
+                threshold = 5.0 * std
         
-        # Source detection
-        fwhm = 3.0  # Typical FWHM in pixels
+        # Try multiple thresholds if needed
+        thresholds = [5.0, 4.0, 3.0]  # Start with standard, then lower if needed
+        sources = None
         
-        daofind = DAOStarFinder(fwhm=fwhm, threshold=threshold)
-        sources = daofind(data_sub)
+        for current_threshold in thresholds:
+            try:
+                # Handle different background estimation results
+                if 'std' in locals():
+                    current_threshold_value = current_threshold * std
+                elif 'bkg' in locals() and hasattr(bkg, 'background_rms'):
+                    current_threshold_value = current_threshold * bkg.background_rms.mean()
+                else:
+                    # Use a fallback threshold based on data statistics
+                    current_threshold_value = current_threshold * np.std(data_sub) / 5.0
+                
+                daofind = DAOStarFinder(fwhm=3.0, threshold=current_threshold_value)
+                sources = daofind(data_sub)
+                
+                if sources is not None and len(sources) >= 10:
+                    logger.info(f"Detected {len(sources)} sources with threshold {current_threshold}σ")
+                    break
+            except Exception as e:
+                logger.warning(f"Error detecting sources at threshold {current_threshold}: {str(e)}")
         
         if sources is None or len(sources) == 0:
             logger.warning(f"No sources detected in {fits_file}")
             return None
             
         # Add RA/Dec columns using WCS
-        pixel_positions = np.column_stack((sources['xcentroid'], sources['ycentroid']))
-        world_positions = wcs.pixel_to_world(pixel_positions[:, 0], pixel_positions[:, 1])
-        
-        sources['ALPHA_J2000'] = world_positions.ra.deg
-        sources['DELTA_J2000'] = world_positions.dec.deg
+        try:
+            pixel_positions = np.column_stack((sources['xcentroid'], sources['ycentroid']))
+            world_positions = wcs.pixel_to_world(pixel_positions[:, 0], pixel_positions[:, 1])
+            
+            sources['ALPHA_J2000'] = world_positions.ra.deg
+            sources['DELTA_J2000'] = world_positions.dec.deg
+        except Exception as e:
+            logger.error(f"Error converting pixel to world coordinates: {str(e)}")
+            return None
         
         logger.info(f"Successfully extracted {len(sources)} sources")
         return sources
@@ -110,13 +135,6 @@ def extract_sources(fits_file: str) -> Table | None:
 def cross_match_gaia(fits_file: str, search_radius: float = 0.5) -> Table | None:
     """
     Cross-match extracted sources with Gaia DR3 catalog.
-    
-    Args:
-        fits_file: Path to the FITS file
-        search_radius: Search radius in degrees
-        
-    Returns:
-        astropy.table.Table: Table of matched Gaia sources or None if query fails
     """
     try:
         with fits.open(fits_file) as hdul:
@@ -197,13 +215,6 @@ def cross_match_gaia(fits_file: str, search_radius: float = 0.5) -> Table | None
 def verify_pointing(fits_file: str, max_offset: float = 5.0) -> dict:
     """
     Verify telescope pointing accuracy by comparing extracted sources with Gaia catalog.
-    
-    Args:
-        fits_file: Path to the FITS file
-        max_offset: Maximum allowed offset in arcseconds for matching
-        
-    Returns:
-        dict: Dictionary containing analysis results
     """
     results = {
         'success': False,
@@ -271,8 +282,6 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0) -> dict:
         # If we have rotation information, log it
         if rotation_angle is not None:
             logger.info(f"Accounting for derotator angle: {rotation_angle:.2f}°")
-            # Note: In a more complete implementation, we would transform coordinates 
-            # based on this rotation angle before matching
         
         for tolerance in matching_tolerances:
             if tolerance > max_offset:
@@ -327,23 +336,34 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0) -> dict:
             if rotation_angle is not None:
                 # Analyze if the offsets correlate with field rotation
                 # A simple correlation metric
-                rot_correlation = np.corrcoef(np.array([offset_angles, np.ones_like(offset_angles) * rotation_angle]))[0, 1]
+                try:
+                    rot_correlation = np.corrcoef(np.array([offset_angles, np.ones_like(offset_angles) * rotation_angle]))[0, 1]
+                except:
+                    rot_correlation = None
             else:
                 rot_correlation = None
+            
+            # Handle case of single match
+            if len(matched_sources) == 1:
+                ra_std = 0.0
+                dec_std = 0.0
+            else:
+                ra_std = float(np.std(ra_offsets))
+                dec_std = float(np.std(dec_offsets))
             
             # Update results with detailed pointing analysis
             results.update({
                 'success': True,
                 'ra_offset_mean': float(np.mean(ra_offsets)),
                 'dec_offset_mean': float(np.mean(dec_offsets)),
-                'ra_offset_std': float(np.std(ra_offsets)),
-                'dec_offset_std': float(np.std(dec_offsets)),
+                'ra_offset_std': ra_std,
+                'dec_offset_std': dec_std,
                 'match_tolerance': used_tolerance,
                 'pointing_analysis': {
                     'total_offset_mean': float(np.mean(total_offsets)),
-                    'total_offset_std': float(np.std(total_offsets)),
+                    'total_offset_std': float(np.std(total_offsets)) if len(matched_sources) > 1 else 0.0,
                     'angle_mean': float(np.mean(offset_angles)),
-                    'angle_std': float(np.std(offset_angles)),
+                    'angle_std': float(np.std(offset_angles)) if len(matched_sources) > 1 else 0.0,
                     'rotation_correlation': rot_correlation
                 }
             })
@@ -363,12 +383,6 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0) -> dict:
 def process_directory(directory: str) -> list:
     """
     Process all FITS files in a directory and its subdirectories.
-    
-    Args:
-        directory: Path to the directory containing FITS files
-        
-    Returns:
-        list: List of result dictionaries for successful analyses
     """
     all_results = []
     
@@ -433,9 +447,6 @@ def process_directory(directory: str) -> list:
 def analyze_alt_az_results(results_list):
     """
     Perform specialized analysis for alt-azimuth mount data.
-    
-    Args:
-        results_list: List of result dictionaries
     """
     if not results_list:
         logger.warning("No results to analyze")
@@ -474,8 +485,8 @@ def analyze_alt_az_results(results_list):
             azs.append(result['az'])
     
     # Calculate vector statistics
-    ra_mean = np.mean(ra_offsets)
-    dec_mean = np.mean(dec_offsets)
+    ra_mean = np.mean(ra_offsets) if ra_offsets else None
+    dec_mean = np.mean(dec_offsets) if dec_offsets else None
     total_mean = np.mean(total_offsets) if total_offsets else None
     
     # Analyze correlation with rotation if we have rotation data
@@ -493,6 +504,9 @@ def analyze_alt_az_results(results_list):
         }
         
         for i, rot in enumerate(rot_angles):
+            if i >= len(total_offsets):
+                continue
+                
             if 0 <= rot < 90:
                 rot_groups["0-90°"].append(total_offsets[i])
             elif 90 <= rot < 180:
@@ -508,224 +522,10 @@ def analyze_alt_az_results(results_list):
             if errors:
                 logger.info(f"  {quadrant}: {np.mean(errors):.2f}\" (n={len(errors)})")
     
-    # Analyze correlation with altitude if we have altitude data
-    if alts and total_offsets:
-        # Simple correlation
-        alt_correlation = np.corrcoef(alts, total_offsets)[0, 1]
-        logger.info(f"Correlation between altitude and pointing error: {alt_correlation:.2f}")
-        
-        # Group by altitude ranges
-        alt_groups = {
-            "0-30°": [],
-            "30-60°": [],
-            "60-90°": []
-        }
-        
-        for i, alt in enumerate(alts):
-            if 0 <= alt < 30:
-                alt_groups["0-30°"].append(total_offsets[i])
-            elif 30 <= alt < 60:
-                alt_groups["30-60°"].append(total_offsets[i])
-            else:
-                alt_groups["60-90°"].append(total_offsets[i])
-        
-        # Calculate average error by altitude range
-        logger.info("Average pointing error by altitude range:")
-        for alt_range, errors in alt_groups.items():
-            if errors:
-                logger.info(f"  {alt_range}: {np.mean(errors):.2f}\" (n={len(errors)})")
-                
-        # Look for horizon effects
-        if alt_groups["0-30°"] and alt_groups["60-90°"]:
-            low_alt_mean = np.mean(alt_groups["0-30°"])
-            high_alt_mean = np.mean(alt_groups["60-90°"])
-            if low_alt_mean > high_alt_mean * 1.5:  # 50% worse at low altitude
-                logger.info(f"Significant horizon effect detected: {low_alt_mean:.2f}\" at low altitude vs {high_alt_mean:.2f}\" at high altitude")
-    
-    # Analyze correlation with azimuth if we have azimuth data
-    if azs and total_offsets:
-        # Simple correlation
-        az_correlation = np.corrcoef(azs, total_offsets)[0, 1]
-        logger.info(f"Correlation between azimuth and pointing error: {az_correlation:.2f}")
-        
-        # Group by azimuth ranges
-        az_groups = {
-            "N (0±45°)": [],
-            "E (90±45°)": [],
-            "S (180±45°)": [],
-            "W (270±45°)": []
-        }
-        
-        for i, az in enumerate(azs):
-            # Normalize to 0-360
-            az = az % 360
-            
-            if az > 315 or az <= 45:
-                az_groups["N (0±45°)"].append(total_offsets[i])
-            elif 45 < az <= 135:
-                az_groups["E (90±45°)"].append(total_offsets[i])
-            elif 135 < az <= 225:
-                az_groups["S (180±45°)"].append(total_offsets[i])
-            else:
-                az_groups["W (270±45°)"].append(total_offsets[i])
-        
-        # Calculate average error by azimuth direction
-        logger.info("Average pointing error by azimuth direction:")
-        for direction, errors in az_groups.items():
-            if errors:
-                logger.info(f"  {direction}: {np.mean(errors):.2f}\" (n={len(errors)})")
-                
-        # Look for imbalance in azimuth
-        if az_groups["E (90±45°)"] and az_groups["W (270±45°)"]:
-            east_mean = np.mean(az_groups["E (90±45°)"])
-            west_mean = np.mean(az_groups["W (270±45°)"])
-            if abs(east_mean - west_mean) > 1.0:  # More than 1 arcsec difference
-                imbalanced = "east" if east_mean > west_mean else "west"
-                logger.info(f"Azimuth imbalance detected: Pointing worse toward {imbalanced} ({abs(east_mean - west_mean):.2f}\" difference)")
-    
-    # Calculate circular statistics for offset angles
-    if angles:
-        # Convert to radians for circular stats
-        angles_rad = np.radians(np.array(angles))
-        sin_sum = np.sum(np.sin(angles_rad))
-        cos_sum = np.sum(np.cos(angles_rad))
-        
-        # Mean angle
-        mean_angle = np.degrees(np.arctan2(sin_sum, cos_sum)) % 360
-        
-        # R value (measure of angular concentration)
-        R = np.sqrt(sin_sum**2 + cos_sum**2) / len(angles)
-        
-        # Circular standard deviation
-        circular_std = np.degrees(np.sqrt(-2 * np.log(R))) if R > 0 else 180
-        
-        logger.info(f"Mean offset direction: {mean_angle:.1f}°")
-        logger.info(f"Directional concentration (R): {R:.2f} (0=random, 1=concentrated)")
-        logger.info(f"Circular standard deviation: {circular_std:.1f}°")
-        
-        # Categorize by direction
-        directions = {
-            "N (±22.5°)": 0,
-            "NE (±22.5°)": 0,
-            "E (±22.5°)": 0,
-            "SE (±22.5°)": 0,
-            "S (±22.5°)": 0,
-            "SW (±22.5°)": 0,
-            "W (±22.5°)": 0,
-            "NW (±22.5°)": 0
-        }
-        
-        for angle in angles:
-            # Normalize to 0-360
-            angle = angle % 360
-            
-            if angle > 337.5 or angle <= 22.5:
-                directions["N (±22.5°)"] += 1
-            elif 22.5 < angle <= 67.5:
-                directions["NE (±22.5°)"] += 1
-            elif 67.5 < angle <= 112.5:
-                directions["E (±22.5°)"] += 1
-            elif 112.5 < angle <= 157.5:
-                directions["SE (±22.5°)"] += 1
-            elif 157.5 < angle <= 202.5:
-                directions["S (±22.5°)"] += 1
-            elif 202.5 < angle <= 247.5:
-                directions["SW (±22.5°)"] += 1
-            elif 247.5 < angle <= 292.5:
-                directions["W (±22.5°)"] += 1
-            else:
-                directions["NW (±22.5°)"] += 1
-        
-        logger.info("Distribution of offset directions:")
-        for direction, count in directions.items():
-            logger.info(f"  {direction}: {count} occurrences")
-    
-    # Advanced analysis: Look for patterns in ALT/AZ/DER space
-    if alts and azs and rot_angles and total_offsets and len(alts) > 10:
-        try:
-            # Multi-variable regression to see which factors influence pointing errors
-            from sklearn.linear_model import LinearRegression
-            from sklearn.preprocessing import StandardScaler
-            import pandas as pd
-            
-            # Create a dataframe with all parameters
-            df = pd.DataFrame({
-                'alt': alts,
-                'az': np.sin(np.radians(azs)),  # Convert to sin/cos components for circularity
-                'az_cos': np.cos(np.radians(azs)),
-                'der': np.sin(np.radians(rot_angles)),
-                'der_cos': np.cos(np.radians(rot_angles)),
-                'error': total_offsets
-            })
-            
-            # Standardize features
-            scaler = StandardScaler()
-            X = scaler.fit_transform(df[['alt', 'az', 'az_cos', 'der', 'der_cos']])
-            y = df['error']
-            
-            # Fit model
-            model = LinearRegression()
-            model.fit(X, y)
-            
-            # Calculate feature importance
-            importance = abs(model.coef_)
-            features = ['Altitude', 'Azimuth (sin)', 'Azimuth (cos)', 'Derotator (sin)', 'Derotator (cos)']
-            
-            # Normalize to sum to 100%
-            importance_pct = 100 * importance / np.sum(importance)
-            
-            logger.info("\nMultivariable Analysis: Factors affecting pointing error")
-            for feat, imp in sorted(zip(features, importance_pct), key=lambda x: x[1], reverse=True):
-                logger.info(f"  {feat}: {imp:.1f}% influence")
-                
-            # Calculate R-squared to see how well the model fits
-            from sklearn.metrics import r2_score
-            y_pred = model.predict(X)
-            r2 = r2_score(y, y_pred)
-            logger.info(f"Model fit (R²): {r2:.2f} (0=random, 1=perfect fit)")
-            
-        except Exception as e:
-            logger.warning(f"Advanced analysis failed: {e}")
-    
     # Output overall conclusion
     logger.info("\nCONCLUSION:")
     if total_mean:
         logger.info(f"Average pointing error: {total_mean:.2f} arcseconds")
-    
-    # Derotator analysis
-    if rot_angles:
-        logger.info(f"Derotator tracking analyzed with {len(rot_angles)} measurements")
-        if len(rot_angles) > 5:  # Only if we have enough data
-            if 'correlation' in locals() and abs(correlation) > 0.3:
-                logger.info(f"Significant correlation detected between derotator angle and pointing errors")
-                logger.info(f"This suggests the derotator may need calibration")
-            else:
-                logger.info(f"No significant correlation between derotator angle and pointing errors")
-                logger.info(f"This suggests the derotator is working properly")
-    
-    # Altitude analysis
-    if alts and len(alts) > 5:
-        logger.info(f"Altitude effects analyzed with {len(alts)} measurements")
-        if 'alt_correlation' in locals() and abs(alt_correlation) > 0.3:
-            logger.info(f"Significant correlation between altitude and pointing errors")
-            logger.info(f"Higher errors at {'lower' if alt_correlation < 0 else 'higher'} altitudes")
-            if alt_correlation < 0:
-                logger.info(f"This may be due to atmospheric refraction or mechanical flexure")
-            else:
-                logger.info(f"This unusual pattern may indicate counterweight/balance issues")
-        else:
-            logger.info(f"No significant correlation between altitude and pointing errors")
-            logger.info(f"This suggests good mechanical balance across different altitudes")
-    
-    # Azimuth analysis
-    if azs and len(azs) > 5:
-        logger.info(f"Azimuth effects analyzed with {len(azs)} measurements")
-        if 'az_correlation' in locals() and abs(az_correlation) > 0.3:
-            logger.info(f"Significant correlation between azimuth and pointing errors")
-            logger.info(f"This may indicate issues with the azimuth bearing or drive system")
-        else:
-            logger.info(f"No significant correlation between azimuth and pointing errors")
-            logger.info(f"This suggests consistent performance across different azimuth positions")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Verify telescope pointing using Gaia catalog')
