@@ -290,6 +290,66 @@ class MmapStacker:
             except FileNotFoundError:
                 pass
 
+    def find_reference_frame(self, files, sample_size=20):
+        """Find a good reference frame by selecting one near field center using parallel solving"""
+        if len(files) > sample_size:
+            sample_files = random.sample(files, sample_size)
+        else:
+            sample_files = files
+
+        # Solve frames in parallel using ProcessPoolExecutor
+        frame_positions = []
+        print(f"\nSolving {len(sample_files)} frames to find field center...")
+
+        with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
+            future_to_file = {
+                executor.submit(self.solve_frame, filename): filename 
+                for filename in sample_files
+            }
+
+            for future in tqdm(
+                concurrent.futures.as_completed(future_to_file),
+                total=len(sample_files),
+                desc="Solving frames"
+            ):
+                filename = future_to_file[future]
+                try:
+                    solved_file = future.result()
+                    if solved_file:
+                        with fits.open(solved_file) as hdul:
+                            wcs = WCS(hdul[0].header)
+                            center = wcs.wcs.crval  # [RA, Dec]
+                            frame_positions.append({
+                                'file': filename,
+                                'center': center
+                            })
+                        try:
+                            os.remove(solved_file)
+                        except:
+                            pass
+                except Exception as e:
+                    print(f"Error solving {filename}: {str(e)}")
+
+        if not frame_positions:
+            raise ValueError("Could not solve any frames")
+
+        # Find median position
+        ra_values = [p['center'][0] for p in frame_positions]
+        dec_values = [p['center'][1] for p in frame_positions]
+        median_ra = np.median(ra_values)
+        median_dec = np.median(dec_values)
+
+        # Find frame closest to median position
+        best_file = min(frame_positions, 
+                       key=lambda p: np.hypot(p['center'][0] - median_ra,
+                                            p['center'][1] - median_dec))
+
+        print(f"\nField center: RA={median_ra:.3f}, Dec={median_dec:.3f}")
+        print(f"Reference frame: {best_file['file']}")
+        print(f"Successfully solved {len(frame_positions)} of {len(sample_files)} frames")
+
+        return best_file['file']            
+
     def process_files(self, files):
         """Process all files with hot pixel removal"""
         print(f"Processing {len(files)} files...")
@@ -298,14 +358,13 @@ class MmapStacker:
         # First detect hot pixels
         self.detect_hot_pixels(files)
         
-        # Initialize reference frame
-        for filename in files:
-            if self._initialize_reference(filename):
-                break
-        
-        if self.reference_wcs is None:
-            raise ValueError("Could not find a solvable reference frame")
-        
+        # Find good reference frame
+        reference_file = self.find_reference_frame(files)
+
+        # Initialize reference WCS
+        if not self._initialize_reference(reference_file):
+            raise ValueError("Could not initialize reference frame")
+    
         # Initialize accumulator files
         for color in ['R', 'G', 'B']:
             temp_array = np.zeros(self.ref_shape, dtype=np.float32)

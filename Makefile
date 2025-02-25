@@ -1,7 +1,7 @@
 # Makefile for astrophotography processing pipeline
 
 # Configuration
-DARK_DIR = /home/jonathan/dark_temps
+DARK_DIR = ../dark_temps
 VENV_DIR = venv
 PYTHON = $(VENV_DIR)/bin/python
 PIP = $(VENV_DIR)/bin/pip
@@ -55,11 +55,11 @@ clean:
 
 # Initial stacking step
 stack: check_venv
-	$(PYTHON) main_script.py 'lights/light_*.fits' --dark-dir $(DARK_DIR)
+	$(PYTHON) main_script.py 'lights/temp_285/light_*.fits' --dark-dir $(DARK_DIR)
 
 # Initial stacking step
 quick: check_venv
-	$(PYTHON) main_script.py 'lights/light_20220314_20*.fits' --dark-dir $(DARK_DIR)
+	$(PYTHON) main_script.py 'lights/temp_292/light_*.fits' --dark-dir $(DARK_DIR)
 
 # Final processing step
 finish: check_venv

@@ -12,11 +12,169 @@ import logging
 from pathlib import Path
 import argparse
 from scipy.stats import pearsonr
+import requests
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+@dataclass
+class SimbadResult:
+    """Result from SIMBAD query"""
+    identifier: str
+    ra_deg: float
+    dec_deg: float
+    mag_v: Optional[float] = None
+
+def parse_ra(ra_str: str) -> float:
+    """Parse RA string from SIMBAD to decimal degrees"""
+    if not ra_str or ra_str.strip() == "":
+        raise ValueError("Empty RA string")
+        
+    # Handle decimal degrees format
+    if " " not in ra_str and ":" not in ra_str and "h" not in ra_str:
+        return float(ra_str)
+        
+    # Handle sexagesimal format (replace h, m, s with :)
+    ra_str = ra_str.replace('h', ':').replace('m', ':').replace('s', '')
+    
+    # Split by : or space
+    parts = ra_str.replace(':', ' ').split()
+    
+    # Convert to decimal degrees
+    if len(parts) >= 3:
+        h = float(parts[0])
+        m = float(parts[1])
+        s = float(parts[2])
+        ra_deg = 15.0 * (h + m/60.0 + s/3600.0)  # 15 degrees per hour
+        return ra_deg
+    elif len(parts) == 2:
+        h = float(parts[0])
+        m = float(parts[1])
+        ra_deg = 15.0 * (h + m/60.0)
+        return ra_deg
+    else:
+        try:
+            return float(parts[0]) * 15.0  # Assuming hours
+        except ValueError:
+            raise ValueError(f"Could not parse RA: {ra_str}")
+
+def parse_dec(dec_str: str) -> float:
+    """Parse Dec string from SIMBAD to decimal degrees"""
+    if not dec_str or dec_str.strip() == "":
+        raise ValueError("Empty Dec string")
+        
+    # Handle decimal degrees format
+    if " " not in dec_str and ":" not in dec_str and "d" not in dec_str:
+        return float(dec_str)
+        
+    # Handle sexagesimal format (replace d, m, s with :)
+    dec_str = dec_str.replace('d', ':').replace('m', ':').replace('s', '')
+    
+    # Split by : or space
+    parts = dec_str.replace(':', ' ').split()
+    
+    # Handle sign
+    sign = 1.0
+    if parts[0].startswith('-'):
+        sign = -1.0
+        parts[0] = parts[0][1:]
+    elif parts[0].startswith('+'):
+        parts[0] = parts[0][1:]
+        
+    # Convert to decimal degrees
+    if len(parts) >= 3:
+        d = float(parts[0])
+        m = float(parts[1])
+        s = float(parts[2])
+        dec_deg = sign * (d + m/60.0 + s/3600.0)
+        return dec_deg
+    elif len(parts) == 2:
+        d = float(parts[0])
+        m = float(parts[1])
+        dec_deg = sign * (d + m/60.0)
+        return dec_deg
+    else:
+        try:
+            return sign * float(parts[0])
+        except ValueError:
+            raise ValueError(f"Could not parse Dec: {dec_str}")
+
+def query_simbad(target: str) -> Optional[SimbadResult]:
+    """Query SIMBAD database for target coordinates using VOTable format"""
+    url = "http://simbad.u-strasbg.fr/simbad/sim-id"
+    params = {
+        "output.format": "VOTABLE",
+        "output.params": "main_id,ra,dec,flux(V),flux_unit(mag)",
+        "Ident": target
+    }
+    
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        
+        logger.info(f"Query URL: {response.url}")
+        
+        # Parse XML response
+        root = ET.fromstring(response.content)
+        
+        # Register namespace
+        ns = {'v': 'http://www.ivoa.net/xml/VOTable/v1.2'}
+        
+        # First look for error response
+        info = root.find('.//v:INFO[@name="Error"]', ns)
+        if info is not None:
+            logger.error(f"SIMBAD Error: {info.get('value')}")
+            return None
+            
+        # Find the TABLEDATA section
+        tabledata = root.find('.//v:TABLEDATA', ns)
+        if tabledata is None:
+            logger.error("No TABLEDATA found in response")
+            logger.debug("Full response:")
+            logger.debug(response.content.decode())
+            return None
+            
+        # Get first row
+        tr = tabledata.find('v:TR', ns)
+        if tr is None:
+            logger.error("No data row found")
+            return None
+            
+        # Get cells
+        cells = tr.findall('v:TD', ns)
+        logger.debug(f"Found {len(cells)} data cells")
+        for i, cell in enumerate(cells):
+            logger.debug(f"Cell {i}: {cell.text}")
+        
+        if len(cells) >= 3:
+            identifier = cells[0].text
+            ra_str = cells[1].text
+            dec_str = cells[2].text
+            mag_str = cells[3].text if len(cells) > 3 else None
+            
+            logger.debug(f"Raw coordinates: RA='{ra_str}', Dec='{dec_str}'")
+            
+            if ra_str and dec_str:
+                ra_deg = parse_ra(ra_str)
+                dec_deg = parse_dec(dec_str)
+                mag_v = float(mag_str) if mag_str and mag_str.strip() != "" else None
+                
+                logger.info(f"Parsed: RA={ra_deg:.4f}°, Dec={dec_deg:.4f}°")
+                return SimbadResult(identifier, ra_deg, dec_deg, mag_v)
+        
+        logger.error("Could not find coordinate data in response")
+        return None
+        
+    except Exception as e:
+        logger.error(f"SIMBAD query error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def extract_sources(fits_file: str, fwhm: float = 3.0, threshold_sigma: float = 5.0,
                    sharplo: float = 0.5, sharphi: float = 2.0,
@@ -142,11 +300,25 @@ def extract_sources(fits_file: str, fwhm: float = 3.0, threshold_sigma: float = 
                 logger.info(f"Filtered to {len(sources)} sources based on star shape")
             
         # Add RA/Dec columns using WCS
-        pixel_positions = np.column_stack((sources['xcentroid'], sources['ycentroid']))
-        world_positions = wcs.pixel_to_world(pixel_positions[:, 0], pixel_positions[:, 1])
-        
-        sources['ALPHA_J2000'] = world_positions.ra.deg
-        sources['DELTA_J2000'] = world_positions.dec.deg
+        try:
+            # Extract pixel coordinates
+            x_coords = sources['xcentroid']
+            y_coords = sources['ycentroid']
+            
+            # Convert pixel to world coordinates safely
+            world_positions = wcs.pixel_to_world(x_coords, y_coords)
+            
+            # Ensure we have a SkyCoord object
+            if hasattr(world_positions, 'ra') and hasattr(world_positions, 'dec'):
+                sources['ALPHA_J2000'] = world_positions.ra.deg
+                sources['DELTA_J2000'] = world_positions.dec.deg
+            else:
+                # Handle case where WCS transformation returns something unexpected
+                logger.error("WCS transformation failed to return proper SkyCoord objects")
+                return None
+        except Exception as e:
+            logger.error(f"Error in WCS coordinate transformation: {str(e)}")
+            return None
         
         logger.info(f"Successfully extracted {len(sources)} sources")
         return sources
@@ -188,12 +360,13 @@ def apply_rotation_correction(image_coords, center_coords, rotation_angle):
         logger.warning(f"Rotation correction failed: {e}")
         return image_coords
 
-def cross_match_gaia(fits_file: str, search_radius: float = 0.5, mag_limit: float = 15.0) -> Table | None:
+def cross_match_gaia(ra_center: float, dec_center: float, search_radius: float = 0.5, mag_limit: float = 15.0) -> Table | None:
     """
     Cross-match extracted sources with Gaia DR3 catalog.
     
     Args:
-        fits_file: Path to the FITS file
+        ra_center: RA of field center in degrees
+        dec_center: Dec of field center in degrees
         search_radius: Search radius in degrees
         mag_limit: Limiting magnitude for Gaia catalog query
         
@@ -201,94 +374,88 @@ def cross_match_gaia(fits_file: str, search_radius: float = 0.5, mag_limit: floa
         astropy.table.Table: Table of matched Gaia sources or None if query fails
     """
     try:
-        with fits.open(fits_file) as hdul:
-            header = hdul[0].header
+        # Validate coordinates
+        if not (-360 <= ra_center <= 360 and -90 <= dec_center <= 90):
+            logger.error(f"Invalid coordinates: RA={ra_center}, Dec={dec_center}")
+            return None
             
-            # Try to get coordinates from header
-            ra_center = None
-            dec_center = None
+        # Log the field center for debugging
+        logger.info(f"Field center: RA={ra_center:.6f}°, Dec={dec_center:.6f}°")
+        
+        # Try astroquery.gaia first, fall back to local catalog if needed
+        try:
+            from astroquery.gaia import Gaia
+            Gaia.ROW_LIMIT = -1  # No row limit
             
-            # Try different keyword combinations
-            if 'CRVAL1' in header and 'CRVAL2' in header:
-                ra_center = header['CRVAL1']
-                dec_center = header['CRVAL2']
-            elif 'RA' in header and 'DEC' in header:
-                ra_center = header['RA']
-                dec_center = header['DEC']
-            elif 'OBJCTRA' in header and 'OBJCTDEC' in header:
-                # Convert from sexagesimal to decimal if needed
-                ra_str = header['OBJCTRA']
-                dec_str = header['OBJCTDEC']
-                try:
-                    coord = SkyCoord(ra_str, dec_str, unit=(u.hourangle, u.deg))
-                    ra_center = coord.ra.deg
-                    dec_center = coord.dec.deg
-                except:
-                    logger.error("Could not parse RA/DEC strings")
+            # Create coordinate object
+            coord = SkyCoord(ra=ra_center, dec=dec_center, unit=(u.deg, u.deg))
+            radius = search_radius * u.degree
+            
+            # Query Gaia DR3 - use supplied magnitude limit
+            query = f"""
+            SELECT 
+                source_id, ra, dec, 
+                phot_g_mean_mag, 
+                parallax, parallax_error,                 
+                pmra, pmdec,
+                phot_bp_mean_mag, phot_rp_mean_mag
+            FROM gaiadr3.gaia_source
+            WHERE 
+                1=CONTAINS(
+                    POINT(ra, dec), 
+                    CIRCLE({ra_center}, {dec_center}, {radius.value})
+                )
+                AND phot_g_mean_mag < {mag_limit}
+            ORDER BY phot_g_mean_mag ASC  -- Sort by brightness
+            """
+            
+            logger.info("Querying Gaia DR3 catalog...")
+            job = Gaia.launch_job(query)
+            results = job.get_results()
+            
+            # Verify we have necessary columns
+            required_cols = ['ra', 'dec']
+            for col in required_cols:
+                if col not in results.colnames:
+                    logger.error(f"Required column '{col}' missing from Gaia results")
                     return None
             
-            if ra_center is None or dec_center is None:
-                logger.error("Could not find RA/DEC information in FITS header")
-                return None
+            if len(results) == 0:
+                logger.warning(f"No Gaia sources found within {search_radius}° of field center")
+            else:
+                logger.info(f"Retrieved {len(results)} Gaia sources")
                 
-            # Validate coordinates
-            if not (-360 <= ra_center <= 360 and -90 <= dec_center <= 90):
-                logger.error(f"Invalid coordinates: RA={ra_center}, Dec={dec_center}")
-                return None
-                
-            # Log the field center for debugging
-            logger.info(f"Field center: RA={ra_center:.6f}°, Dec={dec_center:.6f}°")
+            return results
             
-        from astroquery.gaia import Gaia
-        Gaia.ROW_LIMIT = -1
-        
-        coord = SkyCoord(ra=ra_center, dec=dec_center, unit=(u.deg, u.deg))
-        radius = search_radius * u.degree
-        
-        # Query Gaia DR3 - use supplied magnitude limit
-        query = f"""
-        SELECT 
-            source_id, ra, dec, 
-            phot_g_mean_mag, 
-            parallax, parallax_error,
-            pmra, pmdec,
-            phot_bp_mean_mag, phot_rp_mean_mag
-        FROM gaiadr3.gaia_source
-        WHERE 
-            1=CONTAINS(
-                POINT(ra, dec), 
-                CIRCLE({ra_center}, {dec_center}, {radius.value})
-            )
-            AND phot_g_mean_mag < {mag_limit}
-        ORDER BY phot_g_mean_mag ASC  -- Sort by brightness
-        """
-        
-        job = Gaia.launch_job(query)
-        results = job.get_results()
-        
-        if len(results) == 0:
-            logger.warning(f"No Gaia sources found within {search_radius}° of field center")
-        else:
-            logger.info(f"Retrieved {len(results)} Gaia sources")
+        except Exception as e:
+            logger.error(f"Gaia catalog query via astroquery failed: {str(e)}")
+            logger.info("Trying alternative catalog methods...")
             
-        return results
+            # Placeholder for alternative catalog methods if needed
+            # This could include using a local catalog file or another service
+            logger.error("No alternative catalog source available")
+            return None
         
     except Exception as e:
-        logger.error(f"Gaia catalog query failed: {str(e)}")
+        logger.error(f"Catalog query failed: {str(e)}")
         return None
 
-def verify_pointing(fits_file: str, max_offset: float = 5.0, 
+def verify_pointing(fits_file: str, ra_center: float, dec_center: float, 
+                   max_offset: float = 5.0, search_radius: float = 0.5,
                    fwhm: float = 3.0, threshold_sigma: float = 5.0,
                    sharplo: float = 0.5, sharphi: float = 2.0,
                    roundlo: float = 0.5, roundhi: float = 1.5,
                    minsize: int = 2, min_flux_ratio: float = 0.1,
-                   apply_rotation: bool = True) -> dict:
+                   apply_rotation: bool = True, mag_limit: float = 15.0) -> dict:
     """
     Verify telescope pointing accuracy by comparing extracted sources with Gaia catalog.
     
     Args:
         fits_file: Path to the FITS file
+        ra_center: RA of field center in degrees
+        dec_center: Dec of field center in degrees
         max_offset: Maximum allowed offset in arcseconds for matching
+        search_radius: Search radius in degrees for catalog query
         fwhm: Full width at half maximum of stars in pixels
         threshold_sigma: Detection threshold in sigma above background
         sharplo: Lower bound on sharpness for star detection
@@ -298,6 +465,7 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0,
         minsize: Minimum size of stars in pixels
         min_flux_ratio: Minimum flux ratio compared to brightest star
         apply_rotation: Whether to apply rotation correction
+        mag_limit: Limiting magnitude for Gaia catalog query
         
     Returns:
         dict: Dictionary containing analysis results
@@ -323,65 +491,88 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0,
             results['rotation_angle'] = header.get('DER', None)
             results['alt'] = header.get('ALT', None)
             results['az'] = header.get('AZ', None)
-            
-            # Get image center for rotation correction
-            if 'CRVAL1' in header and 'CRVAL2' in header:
-                center_ra = header['CRVAL1'] 
-                center_dec = header['CRVAL2']
-                center_coords = SkyCoord(ra=center_ra, dec=center_dec, unit=(u.deg, u.deg))
-            else:
-                center_coords = None
     except Exception as e:
         logger.warning(f"Could not extract header data: {e}")
-        center_coords = None
+    
+    # Create center coordinates for rotation correction
+    center_coords = SkyCoord(ra=ra_center, dec=dec_center, unit=(u.deg, u.deg))
     
     # Extract sources with improved filtering
-    sources = extract_sources(
-        fits_file,
-        fwhm=fwhm,
-        threshold_sigma=threshold_sigma,
-        sharplo=sharplo,
-        sharphi=sharphi,
-        roundlo=roundlo,
-        roundhi=roundhi,
-        minsize=minsize,
-        min_flux_ratio=min_flux_ratio
-    )
-    
-    if sources is None:
-        return results
-    results['n_extracted'] = len(sources)
-    
-    # Get catalog sources
-    catalog_sources = cross_match_gaia(fits_file)
-    if catalog_sources is None:
-        return results
-    results['n_catalog'] = len(catalog_sources)
-    
-    if len(sources) == 0 or len(catalog_sources) == 0:
-        logger.warning("No sources available for matching")
+    try:
+        sources = extract_sources(
+            fits_file,
+            fwhm=fwhm,
+            threshold_sigma=threshold_sigma,
+            sharplo=sharplo,
+            sharphi=sharphi,
+            roundlo=roundlo,
+            roundhi=roundhi,
+            minsize=minsize,
+            min_flux_ratio=min_flux_ratio
+        )
+        
+        if sources is None:
+            logger.warning("No sources extracted from the image")
+            return results
+            
+        results['n_extracted'] = len(sources)
+        
+        # Get catalog sources using the provided coordinates
+        catalog_sources = cross_match_gaia(ra_center, dec_center, search_radius=search_radius, mag_limit=mag_limit)
+        if catalog_sources is None:
+            logger.warning("No catalog sources retrieved")
+            return results
+            
+        results['n_catalog'] = len(catalog_sources)
+        
+        if len(sources) == 0 or len(catalog_sources) == 0:
+            logger.warning("No sources available for matching")
+            return results
+            
+        # Verify required columns exist in the sources table
+        required_cols = ['ALPHA_J2000', 'DELTA_J2000']
+        for col in required_cols:
+            if col not in sources.colnames:
+                logger.error(f"Required column '{col}' missing from extracted sources")
+                return results
+    except Exception as e:
+        logger.error(f"Error preparing sources for matching: {str(e)}")
         return results
         
     # Perform cross-matching
     try:
-        image_coords = SkyCoord(
-            ra=sources['ALPHA_J2000'],
-            dec=sources['DELTA_J2000'],
-            unit=(u.deg, u.deg)
-        )
+        # Ensure the required columns exist
+        if 'ALPHA_J2000' not in sources.colnames or 'DELTA_J2000' not in sources.colnames:
+            logger.error("Source table missing required RA/Dec columns")
+            return results
+            
+        if 'ra' not in catalog_sources.colnames or 'dec' not in catalog_sources.colnames:
+            logger.error("Catalog table missing required ra/dec columns")
+            return results
         
-        catalog_coords = SkyCoord(
-            ra=catalog_sources['ra'],
-            dec=catalog_sources['dec'],
-            unit=(u.deg, u.deg)
-        )
+        # Create SkyCoord objects for both sets of coordinates
+        try:
+            image_coords = SkyCoord(
+                ra=sources['ALPHA_J2000'],
+                dec=sources['DELTA_J2000'],
+                unit=(u.deg, u.deg)
+            )
+            
+            catalog_coords = SkyCoord(
+                ra=catalog_sources['ra'],
+                dec=catalog_sources['dec'],
+                unit=(u.deg, u.deg)
+            )
+        except Exception as e:
+            logger.error(f"Error creating SkyCoord objects: {str(e)}")
+            return results
         
         # Get field rotation from results
         rotation_angle = results.get('rotation_angle')
         
         # If we have rotation information and center coordinates, apply correction
         original_image_coords = image_coords
-        if apply_rotation and rotation_angle is not None and center_coords is not None:
+        if apply_rotation and rotation_angle is not None:
             logger.info(f"Accounting for derotator angle: {rotation_angle:.2f}°")
             try:
                 # Apply rotation correction
@@ -391,10 +582,12 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0,
                 # Fall back to original coords
                 image_coords = original_image_coords
         
-        # APPROACH 1: Try progressive matching tolerances
+        # Match sources using progressive tolerances
         matching_tolerances = [1.0, 2.0, 3.0, 5.0, 10.0]  # in arcseconds
         matched_sources = None
         matched_catalog = None
+        ra_offsets = None
+        dec_offsets = None
         used_tolerance = max_offset
         
         for tolerance in matching_tolerances:
@@ -412,6 +605,11 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0,
                 matched_sources = temp_matched_sources
                 matched_catalog = temp_matched_catalog
                 used_tolerance = tolerance
+                
+                # Calculate offsets in arcseconds
+                ra_offsets = (matched_sources['ALPHA_J2000'] - matched_catalog['ra']) * 3600
+                dec_offsets = (matched_sources['DELTA_J2000'] - matched_catalog['dec']) * 3600
+                
                 logger.info(f"Found {len(matched_sources)} matches using {tolerance}\" tolerance")
                 break
                 
@@ -422,14 +620,15 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0,
             
             matched_sources = sources[match_mask]
             matched_catalog = catalog_sources[idx[match_mask]]
-        
-        results['n_matched'] = len(matched_sources)
-        
-        if len(matched_sources) > 0:
-            # Calculate offsets
-            ra_offsets = (matched_sources['ALPHA_J2000'] - matched_catalog['ra']) * 3600  # Convert to arcsec
-            dec_offsets = (matched_sources['DELTA_J2000'] - matched_catalog['dec']) * 3600
             
+            # Calculate offsets in arcseconds
+            if len(matched_sources) > 0:
+                ra_offsets = (matched_sources['ALPHA_J2000'] - matched_catalog['ra']) * 3600
+                dec_offsets = (matched_sources['DELTA_J2000'] - matched_catalog['dec']) * 3600
+        
+        results['n_matched'] = len(matched_sources) if matched_sources is not None else 0
+        
+        if matched_sources is not None and len(matched_sources) > 0:
             # Log individual matches for debugging
             if len(matched_sources) <= 10:  # Only log details for a small number of matches
                 logger.info("Match details:")
@@ -486,16 +685,34 @@ def verify_pointing(fits_file: str, max_offset: float = 5.0,
         
     return results
 
-def process_directory(directory: str, max_offset: float = 5.0,
+def process_directory(directory: str, target: str,
+                     max_offset: float = 5.0, search_radius: float = 0.5,
                      fwhm: float = 3.0, threshold_sigma: float = 5.0,
                      sharplo: float = 0.5, sharphi: float = 2.0,
                      roundlo: float = 0.5, roundhi: float = 1.5,
                      minsize: int = 2, min_flux_ratio: float = 0.1,
-                     apply_rotation: bool = True) -> list:
+                     apply_rotation: bool = True, mag_limit: float = 15.0) -> list:
     """
     Process all FITS files in a directory and its subdirectories.
     """
     all_results = []
+    
+    # First, query SIMBAD for the target coordinates
+    logger.info(f"Querying SIMBAD for target: {target}")
+    simbad_result = query_simbad(target)
+    
+    if simbad_result is None:
+        logger.error(f"Could not resolve target '{target}' using SIMBAD")
+        return all_results
+        
+    # Use the coordinates from SIMBAD
+    ra_center = simbad_result.ra_deg
+    dec_center = simbad_result.dec_deg
+    
+    logger.info(f"Target '{target}' resolved to: {simbad_result.identifier}")
+    logger.info(f"Coordinates: RA={ra_center:.6f}°, Dec={dec_center:.6f}°")
+    if simbad_result.mag_v is not None:
+        logger.info(f"Visual magnitude: {simbad_result.mag_v:.2f}")
     
     try:
         fits_files = list(Path(directory).rglob('*.fits'))
@@ -509,7 +726,10 @@ def process_directory(directory: str, max_offset: float = 5.0,
             logger.info(f"\nProcessing {fits_path.name}")
             results = verify_pointing(
                 str(fits_path),
+                ra_center=ra_center,
+                dec_center=dec_center,
                 max_offset=max_offset,
+                search_radius=search_radius,
                 fwhm=fwhm,
                 threshold_sigma=threshold_sigma,
                 sharplo=sharplo,
@@ -518,7 +738,8 @@ def process_directory(directory: str, max_offset: float = 5.0,
                 roundhi=roundhi,
                 minsize=minsize,
                 min_flux_ratio=min_flux_ratio,
-                apply_rotation=apply_rotation
+                apply_rotation=apply_rotation,
+                mag_limit=mag_limit
             )
             
             if results['success']:
@@ -538,8 +759,11 @@ def process_directory(directory: str, max_offset: float = 5.0,
                         corr = results['pointing_analysis']['rotation_correlation']
                         logger.info(f"Rotation-offset correlation: {corr:.2f}")
                 
-                # Add filename to results and save
+                # Add filename and target info to results
                 results['filename'] = fits_path.name
+                results['target'] = target
+                results['target_ra'] = ra_center
+                results['target_dec'] = dec_center
                 all_results.append(results)
             else:
                 logger.warning("Analysis failed or produced no matches")
@@ -547,6 +771,7 @@ def process_directory(directory: str, max_offset: float = 5.0,
         # After processing all files, generate a summary
         if all_results:
             logger.info("\n===== ANALYSIS SUMMARY =====")
+            logger.info(f"Target: {target} (RA={ra_center:.6f}°, Dec={dec_center:.6f}°)")
             logger.info(f"Successfully analyzed {len(all_results)} out of {len(fits_files)} files")
             
             # Calculate average offsets
@@ -656,6 +881,7 @@ def analyze_alt_az_results(results_list):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Verify telescope pointing using Gaia catalog')
     parser.add_argument('directory', help='Directory containing FITS files')
+    parser.add_argument('--target', type=str, required=True, help='Target name to resolve using SIMBAD (e.g., "M51", "NGC 5139")')
     parser.add_argument('--radius', type=float, default=0.5, help='Search radius in degrees (default: 0.5)')
     parser.add_argument('--match-tolerance', type=float, default=5.0, help='Match tolerance in arcseconds (default: 5.0)')
     parser.add_argument('--alt-az', action='store_true', help='Perform specialized analysis for alt-azimuth mounts')
@@ -675,7 +901,9 @@ if __name__ == '__main__':
     
     results = process_directory(
         args.directory,
+        target=args.target,
         max_offset=args.match_tolerance,
+        search_radius=args.radius,
         fwhm=args.fwhm,
         threshold_sigma=args.threshold,
         sharplo=args.sharplo,
@@ -684,7 +912,8 @@ if __name__ == '__main__':
         roundhi=args.roundhi,
         minsize=args.minsize,
         min_flux_ratio=args.min_flux_ratio,
-        apply_rotation=not args.no_rotation
+        apply_rotation=not args.no_rotation,
+        mag_limit=args.mag_limit
     )
     
     # If we found results and alt-az flag is set, perform specialized analysis
@@ -696,7 +925,8 @@ if __name__ == '__main__':
         try:
             import csv
             with open(args.output, 'w', newline='') as csvfile:
-                fieldnames = ['filename', 'success', 'n_extracted', 'n_catalog', 'n_matched', 
+                fieldnames = ['filename', 'target', 'target_ra', 'target_dec', 'success', 
+                             'n_extracted', 'n_catalog', 'n_matched', 
                              'ra_offset_mean', 'dec_offset_mean', 'ra_offset_std', 'dec_offset_std',
                              'rotation_angle', 'alt', 'az']
                              

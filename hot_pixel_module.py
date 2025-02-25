@@ -248,10 +248,16 @@ class HotPixelAnalyzer:
                 continue
                 
             min_occurrences = int(num_files * self.min_occurrence)
-            
+
+            # Add debug logging
+            print(f"Pattern {pattern}: Checking {len(self.hot_pixels[pattern])} candidates")
+            print(f"Required occurrences: {min_occurrences} of {num_files} frames")
+
             for coord, occurrences in self.hot_pixels[pattern].items():
                 if len(occurrences) >= min_occurrences:
                     self.static_hot_pixels[pattern].add(coord)
+
+            print(f"Found {len(self.static_hot_pixels[pattern])} static hot pixels")
                     
     def _generate_summary(self):
         """Generate analysis summary with temperature data"""
