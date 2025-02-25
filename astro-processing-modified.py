@@ -179,7 +179,9 @@ def query_simbad(target: str) -> Optional[SimbadResult]:
 def extract_sources(fits_file: str, fwhm: float = 3.0, threshold_sigma: float = 5.0,
                    sharplo: float = 0.5, sharphi: float = 2.0,
                    roundlo: float = 0.5, roundhi: float = 1.5,
-                   minsize: int = 2, min_flux_ratio: float = 0.1) -> Table | None:
+                   minsize: int = 2, min_flux_ratio: float = 0.1,
+                   use_wcs: bool = False, plate_scale: float = None,
+                   ra_center: float = None, dec_center: float = None) -> Table | None:
     """
     Extract sources from the image using photutils with improved filtering.
     
@@ -193,6 +195,10 @@ def extract_sources(fits_file: str, fwhm: float = 3.0, threshold_sigma: float = 
         roundhi: Upper bound on roundness for star detection
         minsize: Minimum size of stars in pixels
         min_flux_ratio: Minimum flux ratio compared to brightest star
+        use_wcs: Whether to try using WCS for coordinate conversion
+        plate_scale: Plate scale in arcseconds per pixel (if None, calculated from header)
+        ra_center: RA of field center in degrees (from SIMBAD)
+        dec_center: Dec of field center in degrees (from SIMBAD)
         
     Returns:
         astropy.table.Table: Table of extracted sources or None if extraction fails
@@ -208,21 +214,7 @@ def extract_sources(fits_file: str, fwhm: float = 3.0, threshold_sigma: float = 
             data = hdul[0].data
             header = hdul[0].header
             
-            # Extract field rotation angle and mount position if available
-            rotation_angle = header.get('DER', None)
-            alt = header.get('ALT', None)
-            az = header.get('AZ', None)
-            
-            if rotation_angle is not None:
-                logger.info(f"Derotator angle: {rotation_angle:.2f}°")
-            else:
-                logger.info("No derotator angle (DER) found in header")
-                
-            if alt is not None and az is not None:
-                logger.info(f"Mount position: ALT={alt:.2f}°, AZ={az:.2f}°")
-            else:
-                logger.info("No ALT/AZ position found in header")
-            
+            # Get image dimensions
             if data is None:
                 # Try the first extension if primary HDU has no data
                 if len(hdul) > 1 and hdul[1].data is not None:
@@ -232,12 +224,42 @@ def extract_sources(fits_file: str, fwhm: float = 3.0, threshold_sigma: float = 
                     logger.error(f"No image data found in {fits_file}")
                     return None
             
-            # Get WCS information
-            try:
-                wcs = WCS(header)
-            except Exception as e:
-                logger.error(f"Error parsing WCS: {str(e)}")
-                return None
+            img_height, img_width = data.shape
+            img_center_x, img_center_y = img_width // 2, img_height // 2
+            
+            # For Stellina: calculate plate scale from pixel size and focal length if not provided
+            if plate_scale is None and 'PIXSZ' in header and 'FOCAL' in header:
+                pixsz = header['PIXSZ']  # pixel size in microns
+                focal = header['FOCAL']  # focal length in mm
+                plate_scale = (pixsz / focal) * 206.265  # arcsec/pixel
+                logger.info(f"Calculated plate scale from header: {plate_scale:.4f} arcsec/pixel")
+            elif plate_scale is None:
+                # Use default Stellina plate scale if not provided and can't calculate
+                plate_scale = 1.238
+                logger.info(f"Using default Stellina plate scale: {plate_scale} arcsec/pixel")
+            
+            # Get WCS information if requested (but Stellina headers typically don't have WCS)
+            wcs = None
+            if use_wcs:
+                try:
+                    # Look for WCS keywords
+                    has_wcs = all(keyword in header for keyword in ['CRVAL1', 'CRVAL2', 'CRPIX1', 'CRPIX2'])
+                    
+                    if has_wcs:
+                        wcs = WCS(header)
+                        # Test if WCS is valid by doing a test transformation
+                        test_coords = wcs.pixel_to_world(img_center_x, img_center_y)
+                        if not hasattr(test_coords, 'ra') or not hasattr(test_coords, 'dec'):
+                            logger.warning("WCS transformation test failed, falling back to plate scale")
+                            wcs = None
+                        else:
+                            logger.info(f"WCS initialized successfully. Center coordinates: RA={test_coords.ra.deg:.6f}°, Dec={test_coords.dec.deg:.6f}°")
+                    else:
+                        logger.info("No WCS keywords found in header, using plate scale instead")
+                        wcs = None
+                except Exception as e:
+                    logger.warning(f"Error parsing WCS: {str(e)}. Will use plate scale instead.")
+                    wcs = None
         
         # Estimate background - FIXED: Use SigmaClip class instead of float value
         try:
@@ -298,30 +320,58 @@ def extract_sources(fits_file: str, fwhm: float = 3.0, threshold_sigma: float = 
             else:
                 sources = filtered_sources
                 logger.info(f"Filtered to {len(sources)} sources based on star shape")
-            
-        # Add RA/Dec columns using WCS
+        
+        # Add RA/Dec columns using WCS or plate scale
         try:
             # Extract pixel coordinates
             x_coords = sources['xcentroid']
             y_coords = sources['ycentroid']
             
-            # Convert pixel to world coordinates safely
-            world_positions = wcs.pixel_to_world(x_coords, y_coords)
+            if wcs is not None:
+                # Try using WCS for coordinate conversion
+                try:
+                    # Convert pixel to world coordinates
+                    world_positions = wcs.pixel_to_world(x_coords, y_coords)
+                    
+                    # Ensure we have a SkyCoord object with ra/dec attributes
+                    if hasattr(world_positions, 'ra') and hasattr(world_positions, 'dec'):
+                        sources['ALPHA_J2000'] = world_positions.ra.deg
+                        sources['DELTA_J2000'] = world_positions.dec.deg
+                        logger.info(f"Successfully converted {len(sources)} sources using WCS")
+                    else:
+                        raise ValueError("WCS transformation did not return SkyCoord objects with ra/dec attributes")
+                except Exception as e:
+                    logger.warning(f"WCS coordinate transformation failed: {str(e)}. Using plate scale instead.")
+                    wcs = None
             
-            # Ensure we have a SkyCoord object
-            if hasattr(world_positions, 'ra') and hasattr(world_positions, 'dec'):
-                sources['ALPHA_J2000'] = world_positions.ra.deg
-                sources['DELTA_J2000'] = world_positions.dec.deg
-            else:
-                # Handle case where WCS transformation returns something unexpected
-                logger.error("WCS transformation failed to return proper SkyCoord objects")
-                return None
+            # Use plate scale method with SIMBAD coordinates as the field center
+            if wcs is None:
+                if ra_center is None or dec_center is None:
+                    logger.error("No RA/Dec center coordinates provided. Cannot calculate world coordinates.")
+                    return None
+                
+                # Calculate RA/Dec using plate scale and SIMBAD coordinates as reference
+                # Convert from pixel offsets to arcseconds
+                x_offset_arcsec = (x_coords - img_center_x) * plate_scale
+                y_offset_arcsec = (y_coords - img_center_y) * plate_scale
+                
+                # Convert from arcseconds to degrees
+                x_offset_deg = x_offset_arcsec / 3600.0
+                y_offset_deg = y_offset_arcsec / 3600.0
+                
+                # RA increases to the east (negative x direction)
+                # cos(dec) factor corrects for spherical distortion
+                sources['ALPHA_J2000'] = ra_center - x_offset_deg / np.cos(np.radians(dec_center))
+                sources['DELTA_J2000'] = dec_center + y_offset_deg
+                
+                logger.info(f"Successfully calculated coordinates for {len(sources)} sources using plate scale")
+            
+            logger.info(f"Successfully extracted {len(sources)} sources")
+            return sources
+            
         except Exception as e:
-            logger.error(f"Error in WCS coordinate transformation: {str(e)}")
+            logger.error(f"Error in coordinate transformation: {str(e)}")
             return None
-        
-        logger.info(f"Successfully extracted {len(sources)} sources")
-        return sources
         
     except Exception as e:
         logger.error(f"Error extracting sources: {str(e)}")
@@ -446,7 +496,8 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
                    sharplo: float = 0.5, sharphi: float = 2.0,
                    roundlo: float = 0.5, roundhi: float = 1.5,
                    minsize: int = 2, min_flux_ratio: float = 0.1,
-                   apply_rotation: bool = True, mag_limit: float = 15.0) -> dict:
+                   mag_limit: float = 15.0, use_wcs: bool = False,
+                   plate_scale: float = None) -> dict:
     """
     Verify telescope pointing accuracy by comparing extracted sources with Gaia catalog.
     
@@ -464,7 +515,6 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
         roundhi: Upper bound on roundness for star detection
         minsize: Minimum size of stars in pixels
         min_flux_ratio: Minimum flux ratio compared to brightest star
-        apply_rotation: Whether to apply rotation correction
         mag_limit: Limiting magnitude for Gaia catalog query
         
     Returns:
@@ -478,24 +528,8 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
         'ra_offset_mean': None,
         'dec_offset_mean': None,
         'ra_offset_std': None,
-        'dec_offset_std': None,
-        'rotation_angle': None,
-        'alt': None,
-        'az': None
+        'dec_offset_std': None
     }
-    
-    # Extract rotation angle and mount position from FITS header
-    try:
-        with fits.open(fits_file) as hdul:
-            header = hdul[0].header
-            results['rotation_angle'] = header.get('DER', None)
-            results['alt'] = header.get('ALT', None)
-            results['az'] = header.get('AZ', None)
-    except Exception as e:
-        logger.warning(f"Could not extract header data: {e}")
-    
-    # Create center coordinates for rotation correction
-    center_coords = SkyCoord(ra=ra_center, dec=dec_center, unit=(u.deg, u.deg))
     
     # Extract sources with improved filtering
     try:
@@ -508,7 +542,11 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
             roundlo=roundlo,
             roundhi=roundhi,
             minsize=minsize,
-            min_flux_ratio=min_flux_ratio
+            min_flux_ratio=min_flux_ratio,
+            use_wcs=use_wcs,
+            plate_scale=plate_scale,
+            ra_center=ra_center,
+            dec_center=dec_center
         )
         
         if sources is None:
@@ -566,22 +604,7 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
         except Exception as e:
             logger.error(f"Error creating SkyCoord objects: {str(e)}")
             return results
-        
-        # Get field rotation from results
-        rotation_angle = results.get('rotation_angle')
-        
-        # If we have rotation information and center coordinates, apply correction
-        original_image_coords = image_coords
-        if apply_rotation and rotation_angle is not None:
-            logger.info(f"Accounting for derotator angle: {rotation_angle:.2f}°")
-            try:
-                # Apply rotation correction
-                image_coords = apply_rotation_correction(image_coords, center_coords, rotation_angle)
-            except Exception as e:
-                logger.warning(f"Rotation correction failed: {e}")
-                # Fall back to original coords
-                image_coords = original_image_coords
-        
+            
         # Match sources using progressive tolerances
         matching_tolerances = [1.0, 2.0, 3.0, 5.0, 10.0]  # in arcseconds
         matched_sources = None
@@ -645,18 +668,7 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
             # Convert to 0-360 range
             offset_angles = np.where(offset_angles < 0, offset_angles + 360, offset_angles)
             
-            # If we have rotation information, include it in analysis
-            if rotation_angle is not None:
-                # Analyze if the offsets correlate with field rotation
-                # A simple correlation metric
-                try:
-                    rot_correlation = np.corrcoef(np.array([offset_angles, np.ones_like(offset_angles) * rotation_angle]))[0, 1]
-                except:
-                    rot_correlation = np.nan
-            else:
-                rot_correlation = np.nan
-            
-            # Update results with detailed pointing analysis
+            # Update results with pointing analysis
             results.update({
                 'success': True,
                 'ra_offset_mean': float(np.mean(ra_offsets)),
@@ -664,18 +676,13 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
                 'ra_offset_std': float(np.std(ra_offsets)) if len(matched_sources) > 1 else 0.0,
                 'dec_offset_std': float(np.std(dec_offsets)) if len(matched_sources) > 1 else 0.0,
                 'match_tolerance': used_tolerance,
-                'pointing_analysis': {
-                    'total_offset_mean': float(np.mean(total_offsets)),
-                    'total_offset_std': float(np.std(total_offsets)) if len(matched_sources) > 1 else 0.0,
-                    'angle_mean': float(np.mean(offset_angles)),
-                    'angle_std': float(np.std(offset_angles)) if len(matched_sources) > 1 else 0.0,
-                    'rotation_correlation': rot_correlation
-                }
+                'total_offset_mean': float(np.mean(total_offsets)),
+                'total_offset_std': float(np.std(total_offsets)) if len(matched_sources) > 1 else 0.0
             })
             
             logger.info(f"Matched {len(matched_sources)} sources with {used_tolerance}\" tolerance")
-            logger.info(f"Mean offset: RA={results['ra_offset_mean']:.2f}\", "
-                       f"Dec={results['dec_offset_mean']:.2f}\"")
+            logger.info(f"Mean offset: RA={results['ra_offset_mean']:.2f}\", Dec={results['dec_offset_mean']:.2f}\"")
+            logger.info(f"Total offset: {results['total_offset_mean']:.2f}\" ± {results['total_offset_std']:.2f}\"")
             
         else:
             logger.warning("No matches found within tolerance")
@@ -691,7 +698,8 @@ def process_directory(directory: str, target: str,
                      sharplo: float = 0.5, sharphi: float = 2.0,
                      roundlo: float = 0.5, roundhi: float = 1.5,
                      minsize: int = 2, min_flux_ratio: float = 0.1,
-                     apply_rotation: bool = True, mag_limit: float = 15.0) -> list:
+                     mag_limit: float = 15.0, use_wcs: bool = False,
+                     plate_scale: float = None) -> list:
     """
     Process all FITS files in a directory and its subdirectories.
     """
@@ -738,26 +746,16 @@ def process_directory(directory: str, target: str,
                 roundhi=roundhi,
                 minsize=minsize,
                 min_flux_ratio=min_flux_ratio,
-                apply_rotation=apply_rotation,
-                mag_limit=mag_limit
+                mag_limit=mag_limit,
+                use_wcs=use_wcs,
+                plate_scale=plate_scale
             )
             
             if results['success']:
                 logger.info("Analysis completed successfully")
                 logger.info(f"RA offset: {results['ra_offset_mean']:.2f}\" ± {results['ra_offset_std']:.2f}\"")
                 logger.info(f"Dec offset: {results['dec_offset_mean']:.2f}\" ± {results['dec_offset_std']:.2f}\"")
-                
-                # Log additional alt-az specific information
-                if 'pointing_analysis' in results:
-                    pa = results['pointing_analysis']
-                    logger.info(f"Total offset: {pa['total_offset_mean']:.2f}\" ± {pa['total_offset_std']:.2f}\"")
-                    logger.info(f"Offset angle: {pa['angle_mean']:.1f}° ± {pa['angle_std']:.1f}°")
-                    
-                if results['rotation_angle'] is not None:
-                    logger.info(f"Derotator angle: {results['rotation_angle']:.2f}°")
-                    if 'pointing_analysis' in results and results['pointing_analysis']['rotation_correlation'] is not None:
-                        corr = results['pointing_analysis']['rotation_correlation']
-                        logger.info(f"Rotation-offset correlation: {corr:.2f}")
+                logger.info(f"Total offset: {results['total_offset_mean']:.2f}\" ± {results['total_offset_std']:.2f}\"")
                 
                 # Add filename and target info to results
                 results['filename'] = fits_path.name
@@ -780,11 +778,6 @@ def process_directory(directory: str, target: str,
             
             logger.info(f"Average RA offset: {np.mean(ra_offsets):.2f}\" ± {np.std(ra_offsets):.2f}\"")
             logger.info(f"Average Dec offset: {np.mean(dec_offsets):.2f}\" ± {np.std(dec_offsets):.2f}\"")
-            
-            # Report on rotation angles if available
-            rot_angles = [r['rotation_angle'] for r in all_results if r['rotation_angle'] is not None]
-            if rot_angles:
-                logger.info(f"Derotator angles: {np.mean(rot_angles):.2f}° ± {np.std(rot_angles):.2f}°")
         
         return all_results
                 
@@ -884,7 +877,6 @@ if __name__ == '__main__':
     parser.add_argument('--target', type=str, required=True, help='Target name to resolve using SIMBAD (e.g., "M51", "NGC 5139")')
     parser.add_argument('--radius', type=float, default=0.5, help='Search radius in degrees (default: 0.5)')
     parser.add_argument('--match-tolerance', type=float, default=5.0, help='Match tolerance in arcseconds (default: 5.0)')
-    parser.add_argument('--alt-az', action='store_true', help='Perform specialized analysis for alt-azimuth mounts')
     parser.add_argument('--fwhm', type=float, default=3.0, help='Full width at half maximum of stars in pixels (default: 3.0)')
     parser.add_argument('--threshold', type=float, default=5.0, help='Detection threshold in sigma above background (default: 5.0)')
     parser.add_argument('--sharplo', type=float, default=0.5, help='Lower bound on sharpness for star detection (default: 0.5)')
@@ -893,9 +885,10 @@ if __name__ == '__main__':
     parser.add_argument('--roundhi', type=float, default=1.5, help='Upper bound on roundness for star detection (default: 1.5)')
     parser.add_argument('--minsize', type=int, default=2, help='Minimum size of stars in pixels (default: 2)')
     parser.add_argument('--min-flux-ratio', type=float, default=0.1, help='Minimum flux ratio compared to brightest star (default: 0.1)')
-    parser.add_argument('--no-rotation', action='store_true', help='Disable rotation correction')
     parser.add_argument('--output', help='Output file for results (CSV format)')
     parser.add_argument('--mag-limit', type=float, default=15.0, help='Limiting magnitude for Gaia catalog query (default: 15.0)')
+    parser.add_argument('--use-wcs', action='store_true', help='Try to use WCS for coordinate transformation (not recommended for Stellina)')
+    parser.add_argument('--plate-scale', type=float, help='Override plate scale in arcsec/pixel (default: auto-calculate from FITS header or use 1.238 for Stellina)')
     
     args = parser.parse_args()
     
@@ -912,13 +905,10 @@ if __name__ == '__main__':
         roundhi=args.roundhi,
         minsize=args.minsize,
         min_flux_ratio=args.min_flux_ratio,
-        apply_rotation=not args.no_rotation,
-        mag_limit=args.mag_limit
+        mag_limit=args.mag_limit,
+        use_wcs=args.use_wcs,
+        plate_scale=args.plate_scale
     )
-    
-    # If we found results and alt-az flag is set, perform specialized analysis
-    if results and args.alt_az:
-        analyze_alt_az_results(results)
         
     # If output file is specified, save results to CSV
     if args.output and results:
@@ -928,7 +918,7 @@ if __name__ == '__main__':
                 fieldnames = ['filename', 'target', 'target_ra', 'target_dec', 'success', 
                              'n_extracted', 'n_catalog', 'n_matched', 
                              'ra_offset_mean', 'dec_offset_mean', 'ra_offset_std', 'dec_offset_std',
-                             'rotation_angle', 'alt', 'az']
+                             'total_offset_mean', 'total_offset_std']
                              
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
