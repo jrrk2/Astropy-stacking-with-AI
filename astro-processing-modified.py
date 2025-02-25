@@ -15,7 +15,10 @@ from scipy.stats import pearsonr
 import requests
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import time
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
@@ -491,13 +494,14 @@ def cross_match_gaia(ra_center: float, dec_center: float, search_radius: float =
         return None
 
 def verify_pointing(fits_file: str, ra_center: float, dec_center: float, 
-                   max_offset: float = 5.0, search_radius: float = 0.5,
+                   max_offset: float = 3.0, search_radius: float = 0.5,
                    fwhm: float = 3.0, threshold_sigma: float = 5.0,
                    sharplo: float = 0.5, sharphi: float = 2.0,
                    roundlo: float = 0.5, roundhi: float = 1.5,
                    minsize: int = 2, min_flux_ratio: float = 0.1,
                    mag_limit: float = 15.0, use_wcs: bool = False,
-                   plate_scale: float = None) -> dict:
+                   plate_scale: float = None, fast_mode: bool = True,
+                   max_sources: int = 50, gaia_catalog: Table = None) -> dict:
     """
     Verify telescope pointing accuracy by comparing extracted sources with Gaia catalog.
     
@@ -555,8 +559,11 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
             
         results['n_extracted'] = len(sources)
         
-        # Get catalog sources using the provided coordinates
-        catalog_sources = cross_match_gaia(ra_center, dec_center, search_radius=search_radius, mag_limit=mag_limit)
+        # Get catalog sources - either use the provided catalog or query Gaia
+        catalog_sources = gaia_catalog
+        if catalog_sources is None:
+            catalog_sources = cross_match_gaia(ra_center, dec_center, search_radius=search_radius, mag_limit=mag_limit)
+            
         if catalog_sources is None:
             logger.warning("No catalog sources retrieved")
             return results
@@ -588,6 +595,18 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
             logger.error("Catalog table missing required ra/dec columns")
             return results
         
+        # If using fast mode, limit the number of sources for quicker matching
+        if fast_mode and len(sources) > max_sources:
+            # Sort sources by flux (brightest first)
+            if 'flux' in sources.colnames:
+                sort_idx = np.argsort(sources['flux'])[::-1]  # Descending order
+                sources = sources[sort_idx[:max_sources]]
+                logger.info(f"Fast mode: Limiting to {len(sources)} brightest sources for matching")
+            else:
+                # If no flux column, take the first max_sources
+                sources = sources[:max_sources]
+                logger.info(f"Fast mode: Limiting to first {len(sources)} sources for matching")
+            
         # Create SkyCoord objects for both sets of coordinates
         try:
             image_coords = SkyCoord(
@@ -601,53 +620,133 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
                 dec=catalog_sources['dec'],
                 unit=(u.deg, u.deg)
             )
+            
+            # DEBUGGING: Log coordinate ranges to diagnose matching issues
+            min_ra = np.min(sources['ALPHA_J2000'])
+            max_ra = np.max(sources['ALPHA_J2000'])
+            min_dec = np.min(sources['DELTA_J2000'])
+            max_dec = np.max(sources['DELTA_J2000'])
+            logger.info(f"Source RA range: {min_ra:.6f}° to {max_ra:.6f}°")
+            logger.info(f"Source Dec range: {min_dec:.6f}° to {max_dec:.6f}°")
+            
+            cat_min_ra = np.min(catalog_sources['ra'])
+            cat_max_ra = np.max(catalog_sources['ra'])
+            cat_min_dec = np.min(catalog_sources['dec'])
+            cat_max_dec = np.max(catalog_sources['dec'])
+            logger.info(f"Catalog RA range: {cat_min_ra:.6f}° to {cat_max_ra:.6f}°")
+            logger.info(f"Catalog Dec range: {cat_min_dec:.6f}° to {cat_max_dec:.6f}°")
+            
+            # Test if there's an approximate overlap between the ranges
+            ra_overlap = (min_ra <= cat_max_ra and max_ra >= cat_min_ra)
+            dec_overlap = (min_dec <= cat_max_dec and max_dec >= cat_min_dec)
+            if not (ra_overlap and dec_overlap):
+                logger.warning("COORDINATE MISMATCH: Source and catalog coordinate ranges don't overlap!")
+                
+            # DEBUGGING: Try larger matching tolerance to check if any matches are possible
+            debug_tolerance = 60.0  # 1 arcminute
+            debug_idx, debug_d2d, _ = image_coords.match_to_catalog_sky(catalog_coords)
+            debug_matches = np.sum(debug_d2d < debug_tolerance * u.arcsec)
+            if debug_matches > 0:
+                closest_match = np.min(debug_d2d.arcsec)
+                logger.info(f"DIAGNOSTIC: Found {debug_matches} matches with {debug_tolerance}\" tolerance. Closest match: {closest_match:.2f}\"")
+                
+                # Log a few of the closest matches
+                closest_indices = np.argsort(debug_d2d.arcsec)[:5]
+                logger.info("Closest potential matches:")
+                for i in closest_indices:
+                    if debug_d2d[i].arcsec < debug_tolerance:
+                        src_ra = sources['ALPHA_J2000'][i]
+                        src_dec = sources['DELTA_J2000'][i]
+                        cat_ra = catalog_sources['ra'][debug_idx[i]]
+                        cat_dec = catalog_sources['dec'][debug_idx[i]]
+                        dist = debug_d2d[i].arcsec
+                        logger.info(f"  Match dist: {dist:.2f}\", Source: ({src_ra:.6f}°, {src_dec:.6f}°), Catalog: ({cat_ra:.6f}°, {cat_dec:.6f}°)")
+                        
+                # DEBUGGING: Calculate average offset
+                if debug_matches >= 3:
+                    close_matches = debug_d2d < debug_tolerance * u.arcsec
+                    src_matches = sources[close_matches]
+                    cat_matches = catalog_sources[debug_idx[close_matches]]
+                    ra_offsets = (src_matches['ALPHA_J2000'] - cat_matches['ra']) * 3600  # to arcsec
+                    dec_offsets = (src_matches['DELTA_J2000'] - cat_matches['dec']) * 3600
+                    avg_ra_offset = np.mean(ra_offsets)
+                    avg_dec_offset = np.mean(dec_offsets)
+                    logger.info(f"DIAGNOSTIC: Average offset: RA={avg_ra_offset:.2f}\", Dec={avg_dec_offset:.2f}\"")
+                    logger.info(f"SUGGESTION: Try --match-tolerance {max(10.0, closest_match*1.5):.1f} with these offsets")
+            else:
+                logger.warning("DIAGNOSTIC: NO matches even with 60\" tolerance! Coordinate systems may be completely misaligned.")
+                # Check if the fields are completely different
+                center_dist = SkyCoord(ra=ra_center, dec=dec_center, unit=u.deg).separation(
+                    SkyCoord(ra=np.mean(catalog_sources['ra']), dec=np.mean(catalog_sources['dec']), unit=u.deg)
+                )
+                logger.warning(f"DIAGNOSTIC: Distance between field center and catalog center: {center_dist.deg:.4f}° ({center_dist.arcmin:.2f}')")
+                
+                # Recommend a fix
+                logger.warning("SUGGESTION: Try increasing --radius or check that target coordinates are correct")
         except Exception as e:
             logger.error(f"Error creating SkyCoord objects: {str(e)}")
             return results
-            
-        # Match sources using progressive tolerances
-        matching_tolerances = [1.0, 2.0, 3.0, 5.0, 10.0]  # in arcseconds
+        
         matched_sources = None
         matched_catalog = None
         ra_offsets = None
         dec_offsets = None
         used_tolerance = max_offset
         
-        for tolerance in matching_tolerances:
-            if tolerance > max_offset:
-                break
-                
+        # In fast mode, use a single matching pass with the specified tolerance
+        if fast_mode:
+            logger.info(f"Fast mode: Using fixed matching tolerance of {max_offset} arcseconds")
+            
             # Match sources
-            idx, d2d, _ = image_coords.match_to_catalog_sky(catalog_coords)
-            match_mask = d2d < tolerance * u.arcsec
-            
-            temp_matched_sources = sources[match_mask]
-            temp_matched_catalog = catalog_sources[idx[match_mask]]
-            
-            if len(temp_matched_sources) >= 3:  # We found enough matches
-                matched_sources = temp_matched_sources
-                matched_catalog = temp_matched_catalog
-                used_tolerance = tolerance
-                
-                # Calculate offsets in arcseconds
-                ra_offsets = (matched_sources['ALPHA_J2000'] - matched_catalog['ra']) * 3600
-                dec_offsets = (matched_sources['DELTA_J2000'] - matched_catalog['dec']) * 3600
-                
-                logger.info(f"Found {len(matched_sources)} matches using {tolerance}\" tolerance")
-                break
-                
-        # If we didn't find matches with the progressive approach, use the max tolerance
-        if matched_sources is None:
             idx, d2d, _ = image_coords.match_to_catalog_sky(catalog_coords)
             match_mask = d2d < max_offset * u.arcsec
             
             matched_sources = sources[match_mask]
             matched_catalog = catalog_sources[idx[match_mask]]
             
-            # Calculate offsets in arcseconds
             if len(matched_sources) > 0:
+                # Calculate offsets in arcseconds
                 ra_offsets = (matched_sources['ALPHA_J2000'] - matched_catalog['ra']) * 3600
                 dec_offsets = (matched_sources['DELTA_J2000'] - matched_catalog['dec']) * 3600
+        else:
+            # Match sources using progressive tolerances
+            matching_tolerances = [1.0, 2.0, 3.0, 5.0, 10.0]  # in arcseconds
+            
+            for tolerance in matching_tolerances:
+                if tolerance > max_offset:
+                    break
+                    
+                # Match sources
+                idx, d2d, _ = image_coords.match_to_catalog_sky(catalog_coords)
+                match_mask = d2d < tolerance * u.arcsec
+                
+                temp_matched_sources = sources[match_mask]
+                temp_matched_catalog = catalog_sources[idx[match_mask]]
+                
+                if len(temp_matched_sources) >= 3:  # We found enough matches
+                    matched_sources = temp_matched_sources
+                    matched_catalog = temp_matched_catalog
+                    used_tolerance = tolerance
+                    
+                    # Calculate offsets in arcseconds
+                    ra_offsets = (matched_sources['ALPHA_J2000'] - matched_catalog['ra']) * 3600
+                    dec_offsets = (matched_sources['DELTA_J2000'] - matched_catalog['dec']) * 3600
+                    
+                    logger.info(f"Found {len(matched_sources)} matches using {tolerance}\" tolerance")
+                    break
+                    
+            # If we didn't find matches with the progressive approach, use the max tolerance
+            if matched_sources is None:
+                idx, d2d, _ = image_coords.match_to_catalog_sky(catalog_coords)
+                match_mask = d2d < max_offset * u.arcsec
+                
+                matched_sources = sources[match_mask]
+                matched_catalog = catalog_sources[idx[match_mask]]
+                
+                # Calculate offsets in arcseconds
+                if len(matched_sources) > 0:
+                    ra_offsets = (matched_sources['ALPHA_J2000'] - matched_catalog['ra']) * 3600
+                    dec_offsets = (matched_sources['DELTA_J2000'] - matched_catalog['dec']) * 3600
         
         results['n_matched'] = len(matched_sources) if matched_sources is not None else 0
         
@@ -692,18 +791,76 @@ def verify_pointing(fits_file: str, ra_center: float, dec_center: float,
         
     return results
 
+def process_single_file(args):
+    """
+    Process a single FITS file - designed to be used with multiprocessing.
+    
+    Args:
+        args: Tuple containing (fits_path, params_dict)
+        
+    Returns:
+        Results dictionary or None if processing failed
+    """
+    fits_path, params = args
+    
+    try:
+        logger.info(f"\nProcessing {fits_path.name}")
+        result = verify_pointing(
+            str(fits_path),
+            ra_center=params['ra_center'],
+            dec_center=params['dec_center'],
+            max_offset=params['max_offset'],
+            search_radius=params['search_radius'],
+            fwhm=params['fwhm'],
+            threshold_sigma=params['threshold_sigma'],
+            sharplo=params['sharplo'],
+            sharphi=params['sharphi'],
+            roundlo=params['roundlo'],
+            roundhi=params['roundhi'],
+            minsize=params['minsize'],
+            min_flux_ratio=params['min_flux_ratio'],
+            mag_limit=params['mag_limit'],
+            use_wcs=params['use_wcs'],
+            plate_scale=params['plate_scale'],
+            fast_mode=params['fast_mode'],
+            max_sources=params['max_sources'],
+            gaia_catalog=params['gaia_catalog']
+        )
+        
+        if result['success']:
+            logger.info("Analysis completed successfully")
+            logger.info(f"RA offset: {result['ra_offset_mean']:.2f}\" ± {result['ra_offset_std']:.2f}\"")
+            logger.info(f"Dec offset: {result['dec_offset_mean']:.2f}\" ± {result['dec_offset_std']:.2f}\"")
+            logger.info(f"Total offset: {result['total_offset_mean']:.2f}\" ± {result['total_offset_std']:.2f}\"")
+            
+            # Add filename and target info to results
+            result['filename'] = fits_path.name
+            result['target'] = params['target']
+            result['target_ra'] = params['ra_center']
+            result['target_dec'] = params['dec_center']
+            return result
+        else:
+            logger.warning("Analysis failed or produced no matches")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error processing file {fits_path.name}: {str(e)}")
+        return None
+
 def process_directory(directory: str, target: str,
-                     max_offset: float = 5.0, search_radius: float = 0.5,
+                     max_offset: float = 3.0, search_radius: float = 0.5,
                      fwhm: float = 3.0, threshold_sigma: float = 5.0,
                      sharplo: float = 0.5, sharphi: float = 2.0,
                      roundlo: float = 0.5, roundhi: float = 1.5,
                      minsize: int = 2, min_flux_ratio: float = 0.1,
                      mag_limit: float = 15.0, use_wcs: bool = False,
-                     plate_scale: float = None) -> list:
+                     plate_scale: float = None, fast_mode: bool = True,
+                     max_sources: int = 50, num_workers: int = 8) -> list:
     """
-    Process all FITS files in a directory and its subdirectories.
+    Process all FITS files in a directory and its subdirectories using parallel processing.
     """
     all_results = []
+    start_time = time.time()
     
     # First, query SIMBAD for the target coordinates
     logger.info(f"Querying SIMBAD for target: {target}")
@@ -723,48 +880,68 @@ def process_directory(directory: str, target: str,
         logger.info(f"Visual magnitude: {simbad_result.mag_v:.2f}")
     
     try:
+        # Find all FITS files
         fits_files = list(Path(directory).rglob('*.fits'))
         if not fits_files:
             logger.warning(f"No FITS files found in {directory}")
             return all_results
             
-        logger.info(f"Found {len(fits_files)} FITS files to process")
+        num_files = len(fits_files)
+        logger.info(f"Found {num_files} FITS files to process")
         
-        for fits_path in fits_files:
-            logger.info(f"\nProcessing {fits_path.name}")
-            results = verify_pointing(
-                str(fits_path),
-                ra_center=ra_center,
-                dec_center=dec_center,
-                max_offset=max_offset,
-                search_radius=search_radius,
-                fwhm=fwhm,
-                threshold_sigma=threshold_sigma,
-                sharplo=sharplo,
-                sharphi=sharphi,
-                roundlo=roundlo,
-                roundhi=roundhi,
-                minsize=minsize,
-                min_flux_ratio=min_flux_ratio,
-                mag_limit=mag_limit,
-                use_wcs=use_wcs,
-                plate_scale=plate_scale
-            )
+        # Query Gaia catalog once for all files
+        logger.info(f"Performing initial Gaia catalog query for field center...")
+        gaia_catalog = cross_match_gaia(ra_center, dec_center, search_radius=search_radius, mag_limit=mag_limit)
+        if gaia_catalog is None:
+            logger.warning("Failed to query Gaia catalog. Will try individual queries per file.")
+        else:
+            logger.info(f"Retrieved {len(gaia_catalog)} Gaia sources for matching")
+        
+        # Determine number of workers
+        if num_workers is None or num_workers <= 0:
+            # Use half the available cores by default
+            num_workers = max(1, multiprocessing.cpu_count() // 2)
+        logger.info(f"Using {num_workers} worker processes for parallel processing")
+        
+        # Create parameters dictionary
+        params = {
+            'target': target,
+            'ra_center': ra_center,
+            'dec_center': dec_center,
+            'max_offset': max_offset,
+            'search_radius': search_radius,
+            'fwhm': fwhm,
+            'threshold_sigma': threshold_sigma,
+            'sharplo': sharplo,
+            'sharphi': sharphi,
+            'roundlo': roundlo,
+            'roundhi': roundhi,
+            'minsize': minsize,
+            'min_flux_ratio': min_flux_ratio,
+            'mag_limit': mag_limit,
+            'use_wcs': use_wcs,
+            'plate_scale': plate_scale,
+            'fast_mode': fast_mode,
+            'max_sources': max_sources,
+            'gaia_catalog': gaia_catalog
+        }
+        
+        # Process files in parallel
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            args_list = [(fits_path, params) for fits_path in fits_files]
+            futures = [executor.submit(process_single_file, args) for args in args_list]
             
-            if results['success']:
-                logger.info("Analysis completed successfully")
-                logger.info(f"RA offset: {results['ra_offset_mean']:.2f}\" ± {results['ra_offset_std']:.2f}\"")
-                logger.info(f"Dec offset: {results['dec_offset_mean']:.2f}\" ± {results['dec_offset_std']:.2f}\"")
-                logger.info(f"Total offset: {results['total_offset_mean']:.2f}\" ± {results['total_offset_std']:.2f}\"")
+            # Collect results as they complete
+            for i, future in enumerate(as_completed(futures)):
+                result = future.result()
+                if result is not None and result.get('success', False):
+                    all_results.append(result)
                 
-                # Add filename and target info to results
-                results['filename'] = fits_path.name
-                results['target'] = target
-                results['target_ra'] = ra_center
-                results['target_dec'] = dec_center
-                all_results.append(results)
-            else:
-                logger.warning("Analysis failed or produced no matches")
+                # Report progress
+                if (i+1) % 10 == 0 or (i+1) == num_files:
+                    elapsed = time.time() - start_time
+                    files_per_sec = (i+1) / elapsed if elapsed > 0 else 0
+                    logger.info(f"Processed {i+1}/{num_files} files ({files_per_sec:.2f} files/sec)")
                 
         # After processing all files, generate a summary
         if all_results:
@@ -775,9 +952,18 @@ def process_directory(directory: str, target: str,
             # Calculate average offsets
             ra_offsets = [r['ra_offset_mean'] for r in all_results]
             dec_offsets = [r['dec_offset_mean'] for r in all_results]
+            total_offsets = [r['total_offset_mean'] for r in all_results]
             
             logger.info(f"Average RA offset: {np.mean(ra_offsets):.2f}\" ± {np.std(ra_offsets):.2f}\"")
             logger.info(f"Average Dec offset: {np.mean(dec_offsets):.2f}\" ± {np.std(dec_offsets):.2f}\"")
+            logger.info(f"Average total offset: {np.mean(total_offsets):.2f}\" ± {np.std(total_offsets):.2f}\"")
+            
+            # Performance statistics
+            total_time = time.time() - start_time
+            logger.info(f"\nPerformance Summary:")
+            logger.info(f"Total processing time: {total_time:.2f} seconds")
+            logger.info(f"Average time per file: {total_time/num_files:.2f} seconds")
+            logger.info(f"Files processed per second: {num_files/total_time:.2f}")
         
         return all_results
                 
@@ -872,11 +1058,15 @@ def analyze_alt_az_results(results_list):
         logger.info(f"Average pointing error: {total_mean:.2f} arcseconds")
 
 if __name__ == '__main__':
+    # Configure logging to show timestamps and include the process ID for parallel processing
+    log_format = '%(asctime)s - [PID %(process)d] - %(levelname)s - %(message)s'
+    logging.basicConfig(level=logging.INFO, format=log_format)
+    
     parser = argparse.ArgumentParser(description='Verify telescope pointing using Gaia catalog')
     parser.add_argument('directory', help='Directory containing FITS files')
     parser.add_argument('--target', type=str, required=True, help='Target name to resolve using SIMBAD (e.g., "M51", "NGC 5139")')
     parser.add_argument('--radius', type=float, default=0.5, help='Search radius in degrees (default: 0.5)')
-    parser.add_argument('--match-tolerance', type=float, default=5.0, help='Match tolerance in arcseconds (default: 5.0)')
+    parser.add_argument('--match-tolerance', type=float, default=3.0, help='Match tolerance in arcseconds (default: 3.0)')
     parser.add_argument('--fwhm', type=float, default=3.0, help='Full width at half maximum of stars in pixels (default: 3.0)')
     parser.add_argument('--threshold', type=float, default=5.0, help='Detection threshold in sigma above background (default: 5.0)')
     parser.add_argument('--sharplo', type=float, default=0.5, help='Lower bound on sharpness for star detection (default: 0.5)')
@@ -889,8 +1079,14 @@ if __name__ == '__main__':
     parser.add_argument('--mag-limit', type=float, default=15.0, help='Limiting magnitude for Gaia catalog query (default: 15.0)')
     parser.add_argument('--use-wcs', action='store_true', help='Try to use WCS for coordinate transformation (not recommended for Stellina)')
     parser.add_argument('--plate-scale', type=float, help='Override plate scale in arcsec/pixel (default: auto-calculate from FITS header or use 1.238 for Stellina)')
+    parser.add_argument('--no-fast', action='store_true', help='Disable fast mode (fast mode is enabled by default)')
+    parser.add_argument('--max-sources', type=int, default=50, help='Maximum number of sources to use for matching in fast mode (default: 50)')
+    parser.add_argument('--workers', type=int, default=8, help='Number of worker processes for parallel processing (default: 8)')
     
     args = parser.parse_args()
+    
+    # Record start time for performance measurement
+    start_time = time.time()
     
     results = process_directory(
         args.directory,
@@ -907,9 +1103,12 @@ if __name__ == '__main__':
         min_flux_ratio=args.min_flux_ratio,
         mag_limit=args.mag_limit,
         use_wcs=args.use_wcs,
-        plate_scale=args.plate_scale
+        plate_scale=args.plate_scale,
+        fast_mode=not args.no_fast,
+        max_sources=args.max_sources,
+        num_workers=args.workers
     )
-        
+    
     # If output file is specified, save results to CSV
     if args.output and results:
         try:
@@ -929,5 +1128,12 @@ if __name__ == '__main__':
                     writer.writerow(row)
                     
                 logger.info(f"Results saved to {args.output}")
+                
+            # Report overall performance
+            total_time = time.time() - start_time
+            logger.info(f"\nTotal execution time: {total_time:.2f} seconds")
+            if results:
+                logger.info(f"Time per successful analysis: {total_time/len(results):.2f} seconds")
+                
         except Exception as e:
             logger.error(f"Error saving results to CSV: {e}")
