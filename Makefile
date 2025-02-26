@@ -5,6 +5,8 @@ DARK_DIR = ../dark_temps
 VENV_DIR = venv
 PYTHON = $(VENV_DIR)/bin/python
 PIP = $(VENV_DIR)/bin/pip
+LIGHTS = /Volumes/X10Pro/Stellina/2024-11-21_20-02-31_observation_M45/02-images-initial
+TARGET = M45
 
 # Required Python packages
 REQUIRED_PACKAGES = numpy astropy opencv-python-headless scipy colour-demosaicing reproject tqdm matplotlib psutil astroquery
@@ -71,6 +73,9 @@ status:
 	@echo "Dark directory: $(shell [ -d $(DARK_DIR) ] && echo 'OK' || echo 'Missing')"
 	@echo "Input files: $$(ls img-0???r.fits 2>/dev/null | wc -l || echo 0)"
 	@echo "Stacked outputs: $$(ls stacked_*.fits 2>/dev/null | wc -l || echo 0)"
+
+pairing:
+	python astrometry_script.py --log-file logfile.txt ${LIGHTS} --target $(TARGET)
 
 # Update Python dependencies
 update_deps: check_venv
