@@ -305,6 +305,27 @@ def query_simbad(target: str) -> Optional[SimbadResult]:
         traceback.print_exc()
         return None
 
+def calculate_plate_scale_from_header(header):
+    """
+    Calculate plate scale from FITS header information
+    
+    Args:
+        header: FITS header
+        
+    Returns:
+        plate_scale in arcsec/pixel or None if calculation fails
+    """
+    try:
+        if 'PIXSZ' in header and 'FOCAL' in header:
+            pixsz = float(header['PIXSZ'])  # pixel size in microns
+            focal = float(header['FOCAL'])  # focal length in mm
+            plate_scale = (pixsz / focal) * 206.265  # arcsec/pixel
+            return plate_scale
+        return None
+    except Exception as e:
+        logger.warning(f"Error calculating plate scale from header: {e}")
+        return None
+
 def estimate_field_parameters(fits_file: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
     Estimate field parameters (center RA/Dec, field size) from FITS header if available.
@@ -349,12 +370,10 @@ def estimate_field_parameters(fits_file: str) -> Tuple[Optional[float], Optional
                 logger.info("Use --ra and --dec parameters to specify coordinates for this target")
             
             # Try to estimate field size
-            if all(k in header for k in ['PIXSZ', 'FOCAL']):
-                # Calculate plate scale from pixel size and focal length
-                pixsz = float(header['PIXSZ'])  # pixel size in microns
-                focal = float(header['FOCAL'])  # focal length in mm
-                plate_scale = (pixsz / focal) * 206.265  # arcsec/pixel
-                
+            field_radius_deg = None
+            plate_scale = calculate_plate_scale_from_header(header)
+            
+            if plate_scale is not None:
                 # Get image dimensions
                 if hdul[0].data is not None:
                     height, width = hdul[0].data.shape
@@ -370,7 +389,7 @@ def estimate_field_parameters(fits_file: str) -> Tuple[Optional[float], Optional
                     field_radius_deg = max(field_width_deg, field_height_deg) / 2.0
                     logger.info(f"Estimated field radius: {field_radius_deg:.4f}°")
                     
-                    # Verify the plate scale
+                    # Log the plate scale
                     logger.info(f"Calculated plate scale: {plate_scale:.4f} arcsec/pixel")
             
             return ra_deg, dec_deg, field_radius_deg
@@ -383,8 +402,9 @@ def solve_field_astrometry(source_data: StarSourceData,
                           ra_hint: Optional[float] = None, 
                           dec_hint: Optional[float] = None,
                           radius_hint: Optional[float] = None,
-                          lower_scale: float = 1.2,
-                          upper_scale: float = 1.3) -> Optional[astrometry.Solution]:
+                          lower_scale: float = 0.5,
+                          upper_scale: float = 5.0,
+                          scales: Optional[set] = None) -> Optional[astrometry.Solution]:
     """
     Solve the field using astrometry.net
     
@@ -395,16 +415,30 @@ def solve_field_astrometry(source_data: StarSourceData,
         radius_hint: Optional search radius in degrees
         lower_scale: Lower bound on plate scale in arcsec/pixel
         upper_scale: Upper bound on plate scale in arcsec/pixel
+        scales: Optional set of index scales to use
         
     Returns:
         astrometry.Solution or None if solving fails
     """
     try:
+        # Use default scales if not specified
+        if scales is None:
+            scales = {8}
+        else:
+            # Make sure all provided scales are valid
+            valid_scales = {4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+            scales = {s for s in scales if s in valid_scales}
+            if not scales:
+                logger.warning("No valid scales provided, using default scales {8}")
+                scales = {8}
+        
+        logger.info(f"Using index scales: {scales}")
+        
         # Set up the astrometry solver
         with astrometry.Solver(
             astrometry.series_4100.index_files(
                 cache_directory="astrometry_cache",
-                scales={7,19},
+                scales=scales,
             )
         ) as solver:
             # Prepare size hint
@@ -422,6 +456,8 @@ def solve_field_astrometry(source_data: StarSourceData,
                     radius_deg=radius_hint if radius_hint is not None else 2.0,
                 )
                 logger.info(f"Using position hint: RA={ra_hint:.6f}°, Dec={dec_hint:.6f}°, radius={radius_hint if radius_hint is not None else 2.0}°")
+            
+            # Solve with the extracted star positions
             
             # Log some information about the solving attempt
             logger.info(f"Attempting to solve field with {len(source_data.pixel_coords)} stars")
@@ -554,8 +590,21 @@ def process_single_file(args):
     try:
         logger.info(f"\nProcessing {fits_path.name}")
         
-        # Get image dimensions
+        # Get image dimensions and FITS header
+        plate_scale = None
         with fits.open(str(fits_path)) as hdul:
+            header = hdul[0].header
+            
+            # Calculate plate scale from header if available
+            plate_scale = calculate_plate_scale_from_header(header)
+            if plate_scale:
+                logger.info(f"Calculated plate scale from header: {plate_scale:.4f} arcsec/pixel")
+                # Update the lower and upper scale hints based on the calculated value
+                margin = 0.2  # 20% margin
+                params['lower_scale'] = plate_scale * (1.0 - margin)
+                params['upper_scale'] = plate_scale * (1.0 + margin)
+                logger.info(f"Set plate scale search range: {params['lower_scale']:.4f} to {params['upper_scale']:.4f} arcsec/pixel")
+            
             if hdul[0].data is not None:
                 height, width = hdul[0].data.shape
             elif len(hdul) > 1 and hdul[1].data is not None:
@@ -614,6 +663,7 @@ def process_single_file(args):
             radius_hint=radius_hint,
             lower_scale=params['lower_scale'],
             upper_scale=params['upper_scale'],
+            scales=params['scales']
         )
         
         if solution is None or not solution.has_match():
@@ -664,8 +714,9 @@ def process_directory(directory: str,
                       roundlo: float = 0.5,
                       roundhi: float = 1.5,
                       min_flux_ratio: float = 0.1,
-                      lower_scale: float = 1.2,
-                      upper_scale: float = 1.3,
+                      lower_scale: float = 0.5,
+                      upper_scale: float = 5.0,
+                      index_scales: Optional[str] = None,
                       recursive: bool = False,
                       num_workers: int = 8) -> list:
     """
@@ -686,6 +737,7 @@ def process_directory(directory: str,
         min_flux_ratio: Minimum flux ratio for star detection
         lower_scale: Lower bound on plate scale in arcsec/pixel
         upper_scale: Upper bound on plate scale in arcsec/pixel
+        index_scales: Optional index scales to use (comma-separated list)
         recursive: Whether to search for FITS files recursively
         num_workers: Number of worker processes
         
@@ -709,11 +761,29 @@ def process_directory(directory: str,
                 if simbad_result.mag_v is not None:
                     logger.info(f"Visual magnitude: {simbad_result.mag_v:.2f}")
             else:
-                logger.warning(f"Could not resolve target '{target}' using SIMBAD")        
+                logger.warning(f"Could not resolve target '{target}' using SIMBAD")
+        
+        # Parse index scales if provided
+        scales = None
+        if index_scales:
+            try:
+                scales = set(int(s.strip()) for s in index_scales.split(','))
+                # Validate scales - don't log yet as we'll do that in solve_field_astrometry
+                valid_scales = {4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+                invalid_scales = scales - valid_scales
+                if invalid_scales:
+                    logger.warning(f"Invalid scales provided: {invalid_scales}")
+                    scales = scales & valid_scales
+                    if not scales:
+                        logger.warning("No valid scales provided, will use default scales")
+                        scales = None
+            except:
+                logger.warning(f"Could not parse index scales: {index_scales}")
+                scales = None
         
         # Find all FITS files
         glob_pattern = '**/*.fits' if recursive else '*.fits'
-        fits_files = list(Path(directory).glob(glob_pattern))
+        fits_files = sorted(list(Path(directory).glob(glob_pattern)))
         fits_files.extend(list(Path(directory).glob(glob_pattern.replace('.fits', '.fit'))))
         fits_files.extend(list(Path(directory).glob(glob_pattern.replace('.fits', '.FIT'))))
         fits_files.extend(list(Path(directory).glob(glob_pattern.replace('.fits', '.FITS'))))
@@ -745,6 +815,7 @@ def process_directory(directory: str,
             'min_flux_ratio': min_flux_ratio,
             'lower_scale': lower_scale,
             'upper_scale': upper_scale,
+            'scales': scales,
             'output_dir': output_dir,
             'target': target
         }
@@ -775,6 +846,11 @@ def process_directory(directory: str,
         
         # Log some details about successful results
         if success_count > 0:
+            plate_scales = [r['pixel_scale'] for r in all_results if r.get('pixel_scale')]
+            if plate_scales:
+                avg_scale = sum(plate_scales) / len(plate_scales)
+                logger.info(f"Average plate scale: {avg_scale:.4f} arcsec/pixel")
+            
             # List the output files
             logger.info("\nOutput files:")
             for result in all_results:
@@ -812,8 +888,9 @@ if __name__ == '__main__':
     parser.add_argument('--roundlo', type=float, default=0.5, help='Lower bound on roundness (default: 0.5)')
     parser.add_argument('--roundhi', type=float, default=1.5, help='Upper bound on roundness (default: 1.5)')
     parser.add_argument('--min-flux-ratio', type=float, default=0.1, help='Minimum flux ratio (default: 0.1)')
-    parser.add_argument('--lower-scale', type=float, default=1.2, help='Lower bound on plate scale in arcsec/pixel (default: 0.5)')
-    parser.add_argument('--upper-scale', type=float, default=1.3, help='Upper bound on plate scale in arcsec/pixel (default: 5.0)')
+    parser.add_argument('--lower-scale', type=float, help='Lower bound on plate scale in arcsec/pixel (default: auto from FITS header or 0.5)')
+    parser.add_argument('--upper-scale', type=float, help='Upper bound on plate scale in arcsec/pixel (default: auto from FITS header or 5.0)')
+    parser.add_argument('--index-scales', help='Index scales to use (comma-separated list, e.g. "5,6,7")')
     parser.add_argument('--recursive', action='store_true', help='Search for FITS files recursively')
     parser.add_argument('--workers', type=int, default=8, help='Number of worker processes (default: 8)')
     
@@ -838,6 +915,7 @@ if __name__ == '__main__':
         min_flux_ratio=args.min_flux_ratio,
         lower_scale=args.lower_scale,
         upper_scale=args.upper_scale,
+        index_scales=args.index_scales,
         recursive=args.recursive,
         num_workers=args.workers
     )
