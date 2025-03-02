@@ -147,7 +147,7 @@ class MmapStacker:
             return False
         finally:
             try:
-                os.remove(solved_file)
+                pass # os.remove(solved_file)
             except:
                 pass
         
@@ -286,7 +286,7 @@ class MmapStacker:
             return None
         finally:
             try:
-                os.remove(solved_file)
+                pass # os.remove(solved_file)
             except FileNotFoundError:
                 pass
 
@@ -324,7 +324,7 @@ class MmapStacker:
                                 'center': center
                             })
                         try:
-                            os.remove(solved_file)
+                            pass # os.remove(solved_file)
                         except:
                             pass
                 except Exception as e:

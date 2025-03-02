@@ -61,7 +61,7 @@ stack: check_venv
 
 # Initial stacking step
 quick: check_venv
-	$(PYTHON) main_script.py 'lights/temp_292/light_*.fits' --dark-dir $(DARK_DIR)
+	$(PYTHON) main_script.py 'lights/temp_290/light_*.fits' --dark-dir $(DARK_DIR)
 
 # Final processing step
 finish: check_venv
@@ -75,7 +75,7 @@ status:
 	@echo "Stacked outputs: $$(ls stacked_*.fits 2>/dev/null | wc -l || echo 0)"
 
 pairing:
-	python astrometry_script.py --log-file logfile.txt ${LIGHTS} --target $(TARGET)
+	python astrometry_script.py --debug --log-file logfile.txt ${LIGHTS} --target $(TARGET)
 
 # Update Python dependencies
 update_deps: check_venv

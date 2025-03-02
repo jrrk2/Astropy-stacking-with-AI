@@ -100,6 +100,7 @@ def solve_with_astrometry(fits_path, ra_hint=None, dec_hint=None, radius_hint=No
         logger.info(f"Output directory: {run_dir}")
         
         # Save the command to a file for reference
+        logger.info(cmd_str)
         with open(run_dir / "command.txt", "w") as f:
             f.write(cmd_str)
         

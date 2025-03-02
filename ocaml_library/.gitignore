@@ -1,0 +1,6 @@
+*.cm?
+*.o
+altaz_model
+model.dat
+pairing.sh
+radec_quat
