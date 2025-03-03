@@ -126,7 +126,9 @@ let parse_int hdr key =
 
 let parse_float hdr key =
     if verbose then print_endline key;
-    let key' = Hashtbl.find hdr key in
+    let key' = match Hashtbl.find_opt hdr key with
+      | Some key' -> key'
+      | None -> failwith key in
     if verbose then print_endline key';
     try Scanf.sscanf key' " = %f " (fun f->f)
     with _ -> try Scanf.sscanf key' " %f " (fun f->f)

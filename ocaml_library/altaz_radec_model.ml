@@ -243,19 +243,22 @@ module AltAzIntegration = struct
         (* Apply correction *)
         let (corrected_ra, corrected_dec) = 
           correct_position model ra_now dec_now 0 in
-        
+
         (* Calculate difference *)
-        let ra_diff = corrected_ra -. ra_now in
-        let dec_diff = corrected_dec -. dec_now in
+        let ra_diff = mod_float (540.0 +. corrected_ra -. ra_now) 360.0 -. 180.0 in
+        let dec_diff = mod_float (540.0 +. corrected_dec -. dec_now) 360.0 -. 180.0 in
         let total_diff = sqrt (ra_diff *. ra_diff +. dec_diff *. dec_diff) in
         
+        (* debug calc *)
+        if verbose then Printf.printf "%.4f %.4f %.4f %.4f %.4f %.4f %.4f\n" ra_now dec_now corrected_ra corrected_dec ra_diff dec_diff total_diff;
+
         errors := (alt, az, total_diff) :: !errors;
       done;
     done;
     
     (* Return all errors *)
     !errors
-(* Plot the pointing error distribution by altitude/azimuth *)
+
 (* Plot the pointing error distribution by altitude/azimuth - ultra simple version *)
 let plot_altaz_errors errors =
   let arr = Array.of_list errors in
@@ -320,22 +323,20 @@ let plot_altaz_errors errors =
     (* Process FITS files with plate solve results *)
     let fits_points = Array.fold_left (fun acc filename ->
       try
-        let img = read_image filename in
-        let hdrh, _ = find_header_end filename img in
-        
         (* Extract required information *)
-        let mountalt = parse_float hdrh "MOUNTALT" in
-        let mountaz = parse_float hdrh "MOUNTAZ" in
+        let hdrh = just_header filename in
+        let mountalt = parse_float hdrh "ALT" in
+        let mountaz = parse_float hdrh "AZ" in
         let solvedra = parse_float hdrh "CRVAL1" in
         let solveddec = parse_float hdrh "CRVAL2" in
         let temp = get_temperature hdrh in
-        let focus = try int_of_string (Hashtbl.find hdrh "FOCUSPOS") with _ -> 0 in
+        let focus = try int_of_string (Hashtbl.find hdrh "MAP") with _ -> 0 in
         let timestamp = get_timestamp hdrh in
         
         (* Add to model *)
         add_altaz_reference_point acc mountalt mountaz solvedra solveddec
           focus timestamp filename latitude longitude
-      with e ->
+	   with e ->
         printf "Error processing %s: %s\n" filename (Printexc.to_string e);
         acc
     ) (create_empty_model ()) fit_files in

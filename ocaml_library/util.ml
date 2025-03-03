@@ -60,10 +60,16 @@ let get_timestamp hdrh =
   with _ -> 
     failwith "Could not find DATE-OBS"
 
+let just_header filename =    
+        let fd = open_in_bin filename in
+	let hdrh = Hashtbl.create 257 in
+	let () = scan_header hdrh (read_header fd "") 0 in
+	close_in fd;        
+        hdrh
+
 (* Full frame analysis *)
 let analyze_frame filename =
-  let img = read_image filename in
-  let hdrh, contents = find_header_end filename img in
+  let hdrh = just_header filename in
   let mountra = parse_float hdrh "MOUNTRA" in
   let mountdec = parse_float hdrh "MOUNTDEC=" in
   let solvedra = parse_float hdrh "CRVAL1" in
