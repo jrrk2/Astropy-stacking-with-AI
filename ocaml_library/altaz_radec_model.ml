@@ -255,38 +255,63 @@ module AltAzIntegration = struct
     
     (* Return all errors *)
     !errors
-
-  (* Plot the pointing error distribution by altitude/azimuth *)
-  let plot_altaz_errors errors =
-    let arr = Array.of_list errors in
-    let alt_vals = Array.map (fun (alt, _, _) -> alt) arr in
-    let az_vals = Array.map (fun (_, az, _) -> az) arr in
-    let err_vals = Array.map (fun (_, _, err) -> err) arr in
+(* Plot the pointing error distribution by altitude/azimuth *)
+(* Plot the pointing error distribution by altitude/azimuth - ultra simple version *)
+let plot_altaz_errors errors =
+  let arr = Array.of_list errors in
+  let alt_vals = Array.map (fun (alt, _, _) -> alt) arr in
+  let az_vals = Array.map (fun (_, az, _) -> az) arr in
+  let err_vals = Array.map (fun (_, _, err) -> err) arr in
+  
+  (* Calculate ranges for plot *)
+  let alt_min = Array.fold_left min alt_vals.(0) alt_vals in
+  let alt_max = Array.fold_left max alt_vals.(0) alt_vals in
+  let az_min = Array.fold_left min az_vals.(0) az_vals in
+  let az_max = Array.fold_left max az_vals.(0) az_vals in
+  let err_max = Array.fold_left max err_vals.(0) err_vals in
+  let err_min = Array.fold_left min err_vals.(0) err_vals in
+  
+  (* Add margins to ranges *)
+  let alt_range = alt_max -. alt_min in
+  let az_range = az_max -. az_min in
+  let alt_min = max 0.0 (alt_min -. alt_range *. 0.05) in
+  let alt_max = alt_max +. alt_range *. 0.05 in
+  let az_min = max 0.0 (az_min -. az_range *. 0.05) in 
+  let az_max = az_max +. az_range *. 0.05 in
+  
+  (* Setup plot *)
+  Plplot.plsdev "pngcairo";
+  Plplot.plsfnam "altaz_errors.png";
+  Plplot.plinit ();
+  
+  (* Basic plot setup - no fancy colors or symbols *)
+  Plplot.plenv az_min az_max alt_min alt_max 0 0;
+  Plplot.pllab "Azimuth (degrees)" "Altitude (degrees)" "Pointing Errors by Alt/Az";
+  
+  (* Create a simple text file with the data for external plotting *)
+  let oc = open_out "altaz_errors.csv" in
+  Printf.fprintf oc "Altitude,Azimuth,Error\n";
+  
+  (* Just plot simple dots with uniform size - nothing fancy *)
+  for i = 0 to Array.length alt_vals - 1 do
+    (* Write data to CSV *)
+    Printf.fprintf oc "%.4f,%.4f,%.4f\n" alt_vals.(i) az_vals.(i) err_vals.(i);
     
-    (* Find ranges *)
-    let alt_min = Array.fold_left min alt_vals.(0) alt_vals in
-    let alt_max = Array.fold_left max alt_vals.(0) alt_vals in
-    let az_min = Array.fold_left min az_vals.(0) az_vals in
-    let az_max = Array.fold_left max az_vals.(0) az_vals in
-    let err_max = Array.fold_left max err_vals.(0) err_vals in
-    
-    (* Plot error as point size in Alt/Az coordinates *)
-    Plplot.plsdev "pngcairo";
-    Plplot.plsfnam "altaz_errors.png";
-    Plplot.plinit ();
-    Plplot.plenv az_min az_max alt_min alt_max 0 0;
-    Plplot.pllab "Azimuth (degrees)" "Altitude (degrees)" "Pointing Errors by Alt/Az";
-    
-    (* Scale point sizes *)
-    let scaled_errs = Array.map (fun err -> 1.0 +. 15.0 *. err /. err_max) err_vals in
-    
-    for i = 0 to Array.length alt_vals - 1 do
-      Plplot.plssym 0.0 scaled_errs.(i);
-      Plplot.plpoin [|az_vals.(i)|] [|alt_vals.(i)|] 4;
-    done;
-    
-    Plplot.plend ();
-    printf "Generated altaz_errors.png\n"
+    (* Plot single point with simple symbol *)
+    Plplot.plpoin [|az_vals.(i)|] [|alt_vals.(i)|] 1
+  done;
+  
+  close_out oc;
+  Plplot.plend ();
+  
+  (* Output statistics to make sense of the data *)
+  Printf.printf "Error statistics:\n";
+  Printf.printf "  Minimum error: %.4f degrees\n" err_min;
+  Printf.printf "  Maximum error: %.4f degrees\n" err_max;
+  Printf.printf "  Average error: %.4f degrees\n" 
+    (Array.fold_left (+.) 0.0 err_vals /. float_of_int (Array.length err_vals));
+  Printf.printf "Generated altaz_errors.png and altaz_errors.csv\n";
+  Printf.printf "Use altaz_errors.csv with external plotting tools for better visualization\n"
 
   (* Build a pointing model from a set of observation files *)
   let build_altaz_pointing_model fit_files json_dir latitude longitude =
