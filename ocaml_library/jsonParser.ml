@@ -14,7 +14,9 @@ open Yojson.Basic.Util
   let parse_astrometry_json filename =
     try
       let json = Yojson.Basic.from_file filename in
-      
+      let failed = try json |> member "failed" |> to_bool with _ -> false in
+      if failed then None else (
+
       (* Extract the result section *)
       let result = json |> member "result" in
       
@@ -22,7 +24,11 @@ open Yojson.Basic.Util
       let ra = result |> member "ra" |> safe_float in
       let dec = result |> member "de" |> safe_float in
       let rot = result |> member "rot" |> safe_float in
-      
+
+      (* Extract the params section *)
+      let params = json |> member "params" in
+      let src_file = params |> member "storageFolder" |> to_string in
+
       (* Extract timestamp *)
       let timestamp = result |> member "boardTime" |> safe_float in
       
@@ -33,9 +39,9 @@ open Yojson.Basic.Util
       let alt = motors |> member "ALT" |> safe_float in
       let der = motors |> member "DER" |> safe_float in
       let map = motors |> member "MAP" |> to_int in
-      
+
       (* We'll set solved_ra and solved_dec to 0 for now - will be filled later *)
-      Some { ra; dec; solved_ra = 0.0; solved_dec = 0.0; rot; az; alt; der; map; timestamp; src_file = filename }
+      Some { ra; dec; solved_ra = 0.0; solved_dec = 0.0; rot; az; alt; der; map; timestamp; src_file } )
     with
     | e -> 
         Printf.printf "Error parsing JSON file %s: %s\n" filename (Printexc.to_string e);
@@ -44,7 +50,6 @@ open Yojson.Basic.Util
   let parse_pointing_json filename =
     try
       let json = Yojson.Basic.from_file filename in
-      let src_file = filename in
       
       (* Extract the params section for target coordinates *)
       let params = json |> member "params" in
@@ -67,6 +72,7 @@ open Yojson.Basic.Util
           let der = try motors |> member "DER" |> safe_float with _ -> 0.0 in
           let map = try motors |> member "MAP" |> to_int with _ -> 0 in
           let timestamp = post_guiding |> member "boardTime" |> safe_float in
+	  let src_file = params |> member "storageFolder" |> to_string in
           Some { ra; dec; solved_ra = target_ra; solved_dec = target_dec; rot; az; alt; der; map; timestamp; src_file }
         with _ -> None
       in
@@ -86,6 +92,9 @@ open Yojson.Basic.Util
             let der = astro |> member "motorDer" |> safe_float in
             let map = astro |> member "motorMap" |> to_int in
             let timestamp = astro |> member "boardTime" |> safe_float in
+	    (* Extract the params section *)
+	    let params = json |> member "params" in
+	    let src_file = params |> member "storageFolder" |> to_string in
             Some { ra; dec; solved_ra = target_ra; solved_dec = target_dec; rot; az; alt; der; map; timestamp; src_file }
           with _ -> None
     with

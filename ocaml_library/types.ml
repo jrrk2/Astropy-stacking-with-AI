@@ -21,7 +21,6 @@ type reference_point = {
     mount_dec: float;
     solved_ra: float;
     solved_dec: float;
-    temperature: float;
     focus_position: int;
     correction: qt;
     timestamp: float;

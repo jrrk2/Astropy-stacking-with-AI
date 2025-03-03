@@ -13,7 +13,9 @@ module List = struct
 end
 
 (* Pointing Model module *)
-  
+
+  let focus_to_temp focus = 0.0
+
   let create_empty_model () = {
     reference_points = [];
     ra_temp_coeff = 0.0;
@@ -70,10 +72,10 @@ end
 	Quaternion.from_axis_angle (axis_x, axis_y, axis_z) angle
 
   (* Add a reference point to the model *)
-  let add_reference_point model mount_ra mount_dec solved_ra solved_dec temp focus timestamp src_file =
+  let add_reference_point model mount_ra mount_dec solved_ra solved_dec focus timestamp src_file =
     let correction = create_correction_quaternion mount_ra mount_dec solved_ra solved_dec in
     let ref_point = { 
-      mount_ra; mount_dec; solved_ra; solved_dec; temperature = temp; 
+      mount_ra; mount_dec; solved_ra; solved_dec; 
       focus_position = focus; correction; timestamp; src_file
     } in
     { model with reference_points = ref_point :: model.reference_points }
@@ -91,10 +93,9 @@ end
     (* Sort reference points by distance to the query point *)
     let points_with_dist = List.map (fun p ->
       let angular_dist = calculate_angular_distance ra dec p.mount_ra p.mount_dec in
-      let temp_dist = abs_float (temp -. p.temperature) in
       let focus_dist = abs (focus - p.focus_position) |> float_of_int in
       (* Combined distance with weights *)
-      let combined_dist = angular_dist *. 3.0 +. temp_dist *. 0.2 +. focus_dist *. 0.001 in
+      let combined_dist = angular_dist *. 3.0 +. focus_dist *. 0.001 in
       (p, combined_dist)
     ) model.reference_points in
     
@@ -103,11 +104,12 @@ end
     List.map fst (List.take max_points sorted_points)
   
   (* Correct a mount position using the pointing model *)
-  let correct_position model mount_ra mount_dec temp focus =
+  let correct_position model mount_ra mount_dec focus =
     if List.length model.reference_points = 0 then
       (mount_ra, mount_dec)  (* No correction if no reference points *)
     else
       (* Apply temperature correction *)
+      let temp = focus_to_temp focus in
       let temp_corrected_ra = mount_ra +. model.ra_temp_coeff *. temp in
       let temp_corrected_dec = mount_dec +. model.dec_temp_coeff *. temp in
 
@@ -181,7 +183,7 @@ end
         List.filter (fun p' -> p != p') model.reference_points } in
       
       (* Predict position using the temporary model *)
-      let (pred_ra, pred_dec) = correct_position temp_model p.mount_ra p.mount_dec p.temperature p.focus_position in
+      let (pred_ra, pred_dec) = correct_position temp_model p.mount_ra p.mount_dec p.focus_position in
       
       (* Calculate error *)
       let ra_error = pred_ra -. p.solved_ra in

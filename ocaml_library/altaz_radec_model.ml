@@ -15,7 +15,6 @@ module AltAzIntegration = struct
     mount_dec: float;
     solved_ra: float;
     solved_dec: float;
-    temperature: float;
     focus_position: int;
     correction: qt;
     timestamp: float;
@@ -39,12 +38,11 @@ module AltAzIntegration = struct
         point.mount_alt point.mount_az latitude longitude in
     
     (* Create a reference point for the pointing model *)
-    {
+    let open Types in {
       mount_ra = ra_now;
       mount_dec = dec_now;
       solved_ra = point.solved_ra;
       solved_dec = point.solved_dec;
-      temperature = point.temperature;
       focus_position = point.focus_position;
       correction = point.correction;
       timestamp = point.timestamp;
@@ -52,7 +50,7 @@ module AltAzIntegration = struct
     }
 
   (* Create an Alt/Az reference point *)
-  let create_altaz_reference_point alt az solved_ra solved_dec temp focus timestamp src_file =
+  let create_altaz_reference_point alt az solved_ra solved_dec focus timestamp src_file =
     (* Initially set the correction quaternion to identity - it will be calculated later *)
     {
       mount_alt = alt;
@@ -61,7 +59,6 @@ module AltAzIntegration = struct
       mount_dec = 0.0; (* To be calculated *)
       solved_ra;
       solved_dec;
-      temperature = temp;
       focus_position = focus;
       correction = Quaternion.identity;
       timestamp;
@@ -69,9 +66,9 @@ module AltAzIntegration = struct
     }
 
   (* Add an Alt/Az reference point to the model *)
-  let add_altaz_reference_point model alt az solved_ra solved_dec temp focus timestamp src_file latitude longitude =
+  let add_altaz_reference_point model alt az solved_ra solved_dec focus timestamp src_file latitude longitude =
     (* Create Alt/Az reference point *)
-    let altaz_point = create_altaz_reference_point alt az solved_ra solved_dec temp focus timestamp src_file in
+    let altaz_point = create_altaz_reference_point alt az solved_ra solved_dec focus timestamp src_file in
     
     (* Convert to RA/Dec for the model *)
     let radec_point = convert_to_radec_reference_point altaz_point latitude longitude in
@@ -87,7 +84,6 @@ module AltAzIntegration = struct
       mount_dec = radec_point.mount_dec;
       solved_ra = radec_point.solved_ra;
       solved_dec = radec_point.solved_dec;
-      temperature = radec_point.temperature;
       focus_position = radec_point.focus_position;
       correction = correction;
       timestamp = radec_point.timestamp;
@@ -137,9 +133,25 @@ module AltAzIntegration = struct
         | Some data ->
             (* Store the target RA/DEC with the file directory *)
             let dir = Filename.dirname file in
+            let fmt1 = match String.split_on_char '_' data.src_file with hd::nxt::tl -> hd^"-"^nxt | _ -> failwith data.src_file in
+            let fmt2 = String.split_on_char '-' fmt1 in
             Hashtbl.add target_map dir (data.solved_ra, data.solved_dec);
-            printf "Found target for %s: RA=%.4f, DEC=%.4f\n" 
-              (Filename.basename dir) data.solved_ra data.solved_dec
+            let tm = Unix.gmtime (data.timestamp /. 1000.) in
+            let yr,m,dy,hr,min,sec = tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec in
+            let yr',m',dy',hr',min',sec' = match List.map int_of_string fmt2 with yr::m::dy::hr::min::sec::[] -> yr,m,dy,hr,min,sec | _ -> failwith fmt1 in
+            let jd_ut = computeTheJulianDay true yr m dy +. float_of_int(hr*3600+min*60+sec) /. 86400.0 in
+            let jd_ut' = computeTheJulianDay true yr' m' dy' +. float_of_int(hr'*3600+min'*60+sec') /. 86400.0 in
+            let lst = local_siderial_time' longitude (jd_ut -. jd_2000) in
+            let ra_now, dec_now = j2000_to_jnow data.solved_ra data.solved_dec in
+            let altitude', azimuth', _ = raDectoAltAz ra_now dec_now latitude longitude lst in
+            Printf.printf "lat=%.2f long=%.2f jdate=%.6f jdate'=%.6f ranow=%.4f decnow=%.4f alt'=%.2f az'=%.2f\n" 
+                   latitude longitude jd_ut jd_ut' ra_now dec_now altitude' azimuth';
+            printf "Found target for %s: RA=%.4f, DEC=%.4f, ALT=%.4f, AZ=%.4f\n" 
+              (Filename.basename dir) data.solved_ra data.solved_dec data.alt data.az;
+	    (* Convert back from Alt/Az to RA/Dec *)
+	    let ra_calc, dec_calc, ha_calc = altAztoRaDec altitude' azimuth' latitude longitude lst in
+	    Printf.printf "Calculated RA now: %f Dec: %f\n" ra_calc dec_calc;
+	    Printf.printf "Difference RA now: %f Dec: %f\n" (ra_now -. ra_calc) (dec_now -. dec_calc);            
         | None -> ()
     ) json_files;
     
@@ -154,7 +166,7 @@ module AltAzIntegration = struct
             | Some (target_ra, target_dec) ->
                 (* Add reference point with Alt/Az values *)
                 add_altaz_reference_point m data.alt data.az 
-                  target_ra target_dec 20.0 data.map
+                  target_ra target_dec data.map
                   data.timestamp file latitude longitude
             | None -> m)
         | None -> m
@@ -162,20 +174,11 @@ module AltAzIntegration = struct
         m
     ) model json_files in
     
-    (* Calculate temperature coefficients *)
-    let final_model = calculate_temp_coefficients model_with_points in
-    
-    (* Evaluate model accuracy *)
-    let mean_error = evaluate_model final_model in
-    printf "Alt/Az pointing model built with %d reference points\n" 
-      (List.length final_model.reference_points);
-    printf "Mean prediction error: %.4f degrees\n" mean_error;
-    
     (* Return the model *)
-    final_model
+    model_with_points
 
   (* Function to correct Alt/Az position to properly point at a target RA/Dec *)
-  let correct_altaz_position model alt az temp focus latitude longitude timestamp =
+  let correct_altaz_position model alt az focus latitude longitude timestamp =
     if List.length model.reference_points = 0 then
       (alt, az)  (* No correction if no reference points *)
     else
@@ -194,7 +197,7 @@ module AltAzIntegration = struct
       
       (* Apply pointing model correction in RA/Dec space *)
       let (corrected_ra, corrected_dec) = 
-        correct_position model ra_now dec_now temp focus in
+        correct_position model ra_now dec_now focus in
       
       (* Convert corrected RA/Dec back to Alt/Az *)
       let jd = computeTheJulianDay true year month day +. 
@@ -239,7 +242,7 @@ module AltAzIntegration = struct
         
         (* Apply correction *)
         let (corrected_ra, corrected_dec) = 
-          correct_position model ra_now dec_now 20.0 0 in
+          correct_position model ra_now dec_now 0 in
         
         (* Calculate difference *)
         let ra_diff = corrected_ra -. ra_now in
@@ -306,7 +309,7 @@ module AltAzIntegration = struct
         
         (* Add to model *)
         add_altaz_reference_point acc mountalt mountaz solvedra solveddec
-          temp focus timestamp filename latitude longitude
+          focus timestamp filename latitude longitude
       with e ->
         printf "Error processing %s: %s\n" filename (Printexc.to_string e);
         acc
@@ -324,24 +327,15 @@ module AltAzIntegration = struct
       else
         fits_points
     in
-    
-    (* Calculate temperature coefficients *)
-    let final_model = calculate_temp_coefficients combined_model in
-    
-    (* Evaluate model accuracy *)
-    let mean_error = evaluate_model final_model in
-    printf "Alt/Az pointing model built with %d reference points\n" 
-      (List.length final_model.reference_points);
-    printf "Mean prediction error: %.4f degrees\n" mean_error;
-    
+        
     (* Return the model *)
-    final_model
+    combined_model
 
   (* Interactive testing of Alt/Az model *)
   let interactive_test_altaz_model model latitude longitude =
     printf "\nInteractive Alt/Az Model Testing\n";
     printf "===============================\n";
-    printf "Enter alt, az, temperature and focus (or 'q' to quit):\n";
+    printf "Enter alt, az, focus (or 'q' to quit):\n";
     
     let continue = ref true in
     while !continue do
@@ -353,9 +347,9 @@ module AltAzIntegration = struct
         continue := false
       else
         try
-          let alt, az, temp, focus = Scanf.sscanf line "%f %f %f %d" (fun a b c d -> (a, b, c, d)) in
+          let alt, az, focus = Scanf.sscanf line "%f %f %d" (fun a b c -> (a, b, c)) in
           let timestamp = Unix.gettimeofday() in
-          let (corr_alt, corr_az) = correct_altaz_position model alt az temp focus latitude longitude timestamp in
+          let (corr_alt, corr_az) = correct_altaz_position model alt az focus latitude longitude timestamp in
           
           printf "Mount Alt/Az:      (%.4f, %.4f)\n" alt az;
           printf "Corrected Alt/Az:  (%.4f, %.4f)\n" corr_alt corr_az;

@@ -132,7 +132,7 @@ let plot_model_accuracy model =
       
       (* Predict position using the temporary model *)
       let (pred_ra, pred_dec) = PointingModel.correct_position temp_model p.mount_ra 
-                                   p.mount_dec p.temperature 
+                                   p.mount_dec
                                    p.focus_position in
       
       (* Calculate error between prediction and actual solved position *)
@@ -142,39 +142,7 @@ let plot_model_accuracy model =
       
       (* Return point with errors *)
       (p, ra_error, dec_error, total_error)
-    ) points in
-    
-    (* Plot errors vs temperature *)
-    let temps = List.map (fun ((p:reference_point), _, _, _) -> p.temperature) errors in
-    let total_errs = List.map (fun (_, _, _, e) -> e) errors in
-    
-    (* Convert to arrays for plotting *)
-    let temp_array = Array.of_list temps in
-    let err_array = Array.of_list total_errs in
-    
-    (* Find min/max for ranges *)
-    let t_min = List.fold_left min (List.hd temps) temps in
-    let t_max = List.fold_left max (List.hd temps) temps in
-    let e_min = List.fold_left min (List.hd total_errs) total_errs in
-    let e_max = List.fold_left max (List.hd total_errs) total_errs in
-    
-    (* Add margins *)
-    let t_range = t_max -. t_min in
-    let e_range = e_max -. e_min in
-    let t_min = if t_range = 0.0 then t_min -. 1.0 else t_min -. (t_range *. 0.1) in
-    let t_max = if t_range = 0.0 then t_max +. 1.0 else t_max +. (t_range *. 0.1) in
-    let e_min = if e_range = 0.0 then e_min -. 0.01 else e_min -. (e_range *. 0.1) in
-    let e_max = if e_range = 0.0 then e_max +. 0.01 else e_max +. (e_range *. 0.1) in
-    
-    (* Plot errors vs temperature *)
-    plsdev "pngcairo";
-    plsfnam "model_accuracy.png";
-    plinit ();
-    plenv t_min t_max e_min e_max 0 0;
-    pllab "Temperature (°C)" "Error (degrees)" "Model Accuracy vs Temperature";
-    plpoin temp_array err_array 4;
-    plend ();
-    printf "Generated model_accuracy.png\n";
+    ) points in    
     
     (* Plot errors vs sky position *)
     let ra_array = Array.of_list (List.map (fun (p, _, _, _) -> p.mount_ra) errors) in
@@ -225,7 +193,7 @@ let test_model_on_data model stats =
     
     (* Get model correction *)
     let (pred_ra, pred_dec) = PointingModel.correct_position model s.mountra s.mountdec 
-                                s.temperature (try int_of_string (Hashtbl.find s.hdrh "MAP=") with _ -> 178128) in
+                                (try int_of_string (Hashtbl.find s.hdrh "MAP=") with _ -> 178128) in
     
     (* Corrected error *)
     let corr_ra_error = pred_ra -. s.solvedra in
@@ -319,7 +287,7 @@ let interactive_test_model model =
     else
       try
         let ra, dec, temp, focus = Scanf.sscanf line "%f %f %f %d" (fun a b c d -> (a, b, c, d)) in
-        let (corr_ra, corr_dec) = PointingModel.correct_position model ra dec temp focus in
+        let (corr_ra, corr_dec) = PointingModel.correct_position model ra dec focus in
         
         printf "Mount:      (%.4f, %.4f)\n" ra dec;
         printf "Corrected:  (%.4f, %.4f)\n" corr_ra corr_dec;
@@ -501,27 +469,15 @@ let process_json_files json_dir =
   in
   
   (* Add reference points to the model *)
-  let model_with_points = List.fold_left (fun m (data:astrometry_data) ->
-    (* Use the default temperature if not specified *)
-    let temp = 20.0 in
-    
+  let model_with_points = List.fold_left (fun m (data:astrometry_data) ->    
     (* Add the reference point *)
     PointingModel.add_reference_point m data.ra data.dec 
-      data.solved_ra data.solved_dec temp data.map
+      data.solved_ra data.solved_dec data.map
       data.timestamp data.src_file
   ) model astrometry_data in
-  
-  (* Calculate temperature coefficients *)
-  let final_model = calculate_temp_coefficients model_with_points in
-  
-  (* Evaluate model accuracy *)
-  let mean_error = PointingModel.evaluate_model final_model in
-  printf "Pointing model built with %d reference points\n" 
-    (List.length final_model.reference_points);
-  printf "Mean prediction error: %.4f degrees\n" mean_error;
-  
+    
   (* Return the model *)
-  final_model
+  model_with_points
   
 (* Main entry point *)
 let () =

@@ -2,10 +2,35 @@ open Altaz
 
 let (%.) = mod_float
 
+(* Atmospheric refraction correction - convert apparent to true altitude *)
+let correct_refraction apparent_alt =
+  (* Convert to radians *)
+  let alt_rad = apparent_alt *. (Float.pi /. 180.) in
+  
+  (* Calculate refraction in arcminutes for standard conditions *)
+  let refraction_arcmin = 
+    if apparent_alt > 15.0 then
+      (* Above 15° altitude - simpler formula *)
+      1.02 /. tan(alt_rad +. 10.3 /. (apparent_alt +. 5.11))
+    else if apparent_alt >= 0.0 then
+      (* Low altitude - more complex formula *)
+      let r = 0.1594 +. apparent_alt *. (0.0196 +. 0.00002 *. apparent_alt) in
+      r *. (1.0 /. tan(alt_rad))
+    else
+      (* Below horizon - use horizon value *)
+      34.0
+  in
+  
+  (* Convert arcminutes to degrees and return true altitude *)
+  let refraction_degrees = refraction_arcmin /. 60.0 in
+  apparent_alt -. refraction_degrees
+
 (* Inverse of raDectoAltAz - converts altitude and azimuth to RA and Dec *)
 let altAztoRaDec _Alt _Az _Lat _Long _LST =
+  let true_alt = correct_refraction _Alt in
+
   (* Convert degrees to radians *)
-  let alt_rad = _Alt *. (Float.pi /. 180.) in
+  let alt_rad = true_alt *. (Float.pi /. 180.) in
   let az_rad = _Az *. (Float.pi /. 180.) in
   let lat_rad = _Lat *. (Float.pi /. 180.) in
   

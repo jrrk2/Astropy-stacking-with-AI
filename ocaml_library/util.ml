@@ -28,69 +28,6 @@ let load_model_from_file filename =
       printf "Error loading model file: %s\n" (Printexc.to_string e);
       None    
 
-let calculate_temp_coefficients model =
-  if List.length model.reference_points < 2 then
-    model  (* Not enough data points *)
-  else
-    let temps = List.map (fun (p:reference_point) -> p.temperature) model.reference_points in
-    let ra_errors = List.map (fun p -> p.mount_ra -. p.solved_ra) model.reference_points in
-    let dec_errors = List.map (fun p -> p.mount_dec -. p.solved_dec) model.reference_points in
-    
-    (* Print all inputs *)
-    if verbose then Printf.printf "DEBUG Temperature coefficients inputs:\n";
-    let patht n s = let l = String.length s in if l < n then s else String.sub s (l-n) n in
-    List.iter (fun (p:reference_point) -> 
-      Printf.printf "%s Point: temp=%.4f, ra_err=%.4f, dec_err=%.4f\n" 
-        (patht 60 p.src_file) p.temperature (p.mount_ra -. p.solved_ra) (p.mount_dec -. p.solved_dec)
-    ) model.reference_points;
-    
-    (* Simple linear regression for RA vs temperature *)
-    let n = float_of_int (List.length temps) in
-    let sum_t = List.fold_left (+.) 0.0 temps in
-    let sum_ra_err = List.fold_left (+.) 0.0 ra_errors in
-    let sum_t_ra = List.fold_left2 (fun acc t ra -> acc +. t *. ra) 0.0 temps ra_errors in
-    let sum_t2 = List.fold_left (fun acc t -> acc +. t *. t) 0.0 temps in
-    
-    (* Debug intermediate calculations *)
-    if verbose then Printf.printf "DEBUG regression calculations: n=%.0f, sum_t=%.4f, sum_t2=%.4f\n" n sum_t sum_t2;
-    if verbose then Printf.printf "DEBUG regression calculations: sum_ra_err=%.4f, sum_t_ra=%.4f\n" sum_ra_err sum_t_ra;
-    
-    let denominator = ((n *. sum_t2) -. (sum_t *. sum_t)) in
-    
-    (* Check for division by zero *)
-    if abs_float denominator < 1e-10 then
-      (Printf.printf "WARNING: Near-zero denominator in temperature coefficient calculation\n";
-       { model with ra_temp_coeff = 0.0; dec_temp_coeff = 0.0 })
-    else 
-      let ra_coeff = ((n *. sum_t_ra) -. (sum_t *. sum_ra_err)) /. denominator in
-      
-      (* Simple linear regression for DEC vs temperature *)
-      let sum_dec_err = List.fold_left (+.) 0.0 dec_errors in
-      let sum_t_dec = List.fold_left2 (fun acc t dec -> acc +. t *. dec) 0.0 temps dec_errors in
-      
-      if verbose then Printf.printf "DEBUG regression calculations: sum_dec_err=%.4f, sum_t_dec=%.4f\n" sum_dec_err sum_t_dec;
-      
-      let dec_coeff = ((n *. sum_t_dec) -. (sum_t *. sum_dec_err)) /. denominator in
-      
-      if verbose then Printf.printf "DEBUG Calculated coefficients: ra=%.8f, dec=%.8f\n" ra_coeff dec_coeff;
-      
-      { model with ra_temp_coeff = ra_coeff; dec_temp_coeff = dec_coeff }
-
-let calculate_temp_coefficient stats =
-  let n = float_of_int (Array.length stats) in
-  let sum_x = Array.fold_left (fun acc s -> acc +. s.temperature) 0.0 stats in
-  let sum_y = Array.fold_left (fun acc s -> acc +. s.mountra) 0.0 stats in
-  let sum_xy = Array.fold_left (fun acc s -> 
-    acc +. (s.temperature *. s.mountra)) 0.0 stats in
-  let sum_xx = Array.fold_left (fun acc s -> 
-    acc +. (s.temperature *. s.temperature)) 0.0 stats in
-  
-  let slope = ((n *. sum_xy) -. (sum_x *. sum_y)) /. 
-              ((n *. sum_xx) -. (sum_x *. sum_x)) in
-  let intercept = (sum_y -. (slope *. sum_x)) /. n in
-  
-  (slope, intercept)
-
 (* Extract temperature from FITS header *)
 let get_temperature hdrh =
   try 
@@ -203,10 +140,3 @@ let analyze_frames files flags =
     ) stats
   end;
   
-  if flags.show_coeff then begin
-    let (slope, intercept) = calculate_temp_coefficient stats in
-    printf "\nTemperature Coefficient Analysis:\n";
-    printf "================================\n";
-    printf "Temperature coefficient: %.3f ADU/°C\n" slope;
-    printf "Dark current at 0°C: %.1f ADU\n" intercept
-  end
