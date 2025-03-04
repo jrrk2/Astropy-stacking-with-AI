@@ -92,6 +92,13 @@ type analysis_flags = {
   mutable build_model: bool;
 } [@@deriving yojson]
 
+type simbad_rslt = {
+identifier: string;
+ra_deg: float;
+dec_deg: float;
+mag_v: float option;
+}
+
 (* Helper for pattern matching on tuples *)
 let fst3 (a, _, _) = a
 let snd3 (_, b, _) = b

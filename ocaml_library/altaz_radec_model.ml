@@ -1,5 +1,6 @@
 (* Interface between Alt/Az conversion and quaternion pointing model *)
 open Types
+open Fits
 open Util
 open Printf
 open Altaz  (* Import your Alt/Az conversion module *)

@@ -150,3 +150,10 @@ let write_rgb_fits filename data wcs exposure = let open Printf in
     let padding = String.make (2880 - (Bytes.length buf mod 2880)) ' ' in
     output_string oc padding;
     close_out oc
+
+let just_header filename =    
+        let fd = open_in_bin filename in
+	let hdrh = Hashtbl.create 257 in
+	let () = scan_header hdrh (read_header fd "") 0 in
+	close_in fd;        
+        hdrh

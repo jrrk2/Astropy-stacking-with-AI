@@ -1,12 +1,22 @@
 (executable
-  (name altaz_radec_model)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime)
-  (preprocess (pps ppx_deriving_yojson))
-  (modules types fits quaternion pointingModel jsonParser util altaz altaz_to_radec altaz_radec_model))
+  (name stellina_process)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types)
+  (preprocess (pps lwt_ppx))
+  (modules fits quaternion pointingModel fits_helper util jsonParser altaz altaz_to_radec astro_utils simbad query_simbad stellina_process))
  
+(executable
+  (name altaz_radec_model)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model))
+
+(library
+  (name types)
+  (preprocess (pps ppx_deriving_yojson))
+  (modules types))
+  
 (env
   (dev
-    (flags (:standard -g -w -27))
+    (flags (:standard -g -w -26 -w -27 -w -32 -w -34))
   )
 )
   
