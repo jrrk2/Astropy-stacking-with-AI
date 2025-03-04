@@ -2,7 +2,8 @@
   (name stellina_process)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types)
   (preprocess (pps lwt_ppx))
-  (modules fits quaternion pointingModel fits_helper util jsonParser altaz altaz_to_radec astro_utils simbad query_simbad stellina_process))
+  (modules fits util jsonParser quaternion pointingModel pointing_integration 
+           altaz altaz_to_radec astro_utils simbad query_simbad stellina_process))
  
 (executable
   (name altaz_radec_model)
@@ -19,4 +20,3 @@
     (flags (:standard -g -w -26 -w -27 -w -32 -w -34))
   )
 )
-  
