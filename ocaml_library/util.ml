@@ -143,5 +143,31 @@ let analyze_frames files flags =
       printf "%8.1f        %8.4f         %8.4f         %8.4f         %8.4f         %8.1f\n" 
         s.temperature s.mountra s.mountdec s.solvedra s.solveddec (s.timestamp -. !datum)
     ) stats
-  end;
-  
+  end
+
+(* Function to add to your get_new_filepath function in stellina_process.ml *)
+let extract_date_from_fits hdrh =
+  try
+    (* Print raw DATE-OBS for debugging *)
+    Printf.printf "  DATE-OBS raw: %s\n" 
+      (try Hashtbl.find hdrh "DATE-OBS=" with Not_found -> "Not found");
+    
+    (* Get timestamp using existing function *)
+    let timestamp = get_timestamp hdrh in
+    let tm = Unix.localtime timestamp in
+    
+    (* Format date components *)
+    let year = tm.tm_year + 1900 in
+    let month = tm.tm_mon + 1 in
+    let day = tm.tm_mday in
+    let hour = tm.tm_hour in
+    let minute = tm.tm_min in
+    let second = tm.tm_sec in
+    
+    Printf.printf "  Extracted date: %04d-%02d-%02d %02d:%02d:%02d\n" 
+      year month day hour minute second;
+    
+    Some (year, month, day, hour, minute, second)
+  with e -> 
+    Printf.printf "  Date extraction failed: %s\n" (Printexc.to_string e);
+    None

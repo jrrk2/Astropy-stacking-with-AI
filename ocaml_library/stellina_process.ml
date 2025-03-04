@@ -64,9 +64,6 @@ let get_new_filepath fits_path ?(base_dir="lights") ?(calibrated=false) () =
     (* Extract temperature *)
     let temp = get_temperature hdrh in
     
-    (* Extract DATE-OBS *)
-    let date_obs = parse_string_header hdrh "DATE-OBS=" in
-    
     (* Check if filename indicates Bayer pattern *)
     let fits_filename = Filename.basename fits_path in
     let bayer_pattern = 
@@ -74,22 +71,31 @@ let get_new_filepath fits_path ?(base_dir="lights") ?(calibrated=false) () =
       else if String.contains fits_filename 'b' then "BGGR"
       else ""
     in
-    
+
+    let clean_bayer s = match String.split_on_char '\'' s with
+      | _::nxt::_ -> String.trim nxt
+      | oth -> s in
+
     (* Also check for BAYERPAT keyword in header if available *)
     let bayer_pattern = 
       match Hashtbl.find_opt hdrh "BAYERPAT=" with
-      | Some pat -> parse_string_header hdrh "BAYERPAT="
+      | Some pat -> clean_bayer (parse_string_header hdrh "BAYERPAT=")
       | None -> bayer_pattern
     in
     
     (* Create directory name based on temperature *)
     let temp_k = int_of_float (Float.round (temp +. 273.15)) in
     let temp_dir = sprintf "temp_%d" temp_k in
-    
-    (* Format date for filename *)
+
+    (* Extract date from FITS *)
     let (year, month, day, hour, minute, second) = 
-      Scanf.sscanf date_obs "%d-%d-%dT%d:%d:%d" 
-        (fun y m d h min s -> (y, m, d, h, min, s))
+      match extract_date_from_fits hdrh with
+      | Some date_components -> date_components
+      | None -> 
+	  (* Default to current date/time if extraction fails *)
+	  let tm = Unix.localtime (Unix.time()) in
+	  (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, 
+	   tm.tm_hour, tm.tm_min, tm.tm_sec)
     in
     
     (* Add Bayer pattern and calibration status to filename *)
@@ -164,7 +170,6 @@ let annotate_fits_from_json json_path fits_path pointing_model =
     
     (* Get FITS header *)
     let hdrh = just_header fits_path in
-    let date_obs = parse_string_header hdrh "DATE-OBS=" in
     
     (* Calculate RA/DEC from Alt/Az *)
     let ra, dec = Altaz_to_radec.altaz_to_j2000 alt az 52.2 0.12 in
