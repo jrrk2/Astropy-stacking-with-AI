@@ -14,7 +14,7 @@ end
 
 (* Pointing Model module *)
 
-  let focus_to_temp focus = 0.0
+  let focus_to_temp _ = 0.0
 
   let create_empty_model () = {
     reference_points = [];
@@ -89,7 +89,7 @@ end
     acos dot_clamped
   
   (* Find nearest reference points for interpolation *)
-  let find_nearest_points model ra dec temp focus max_points =
+  let find_nearest_points model ra dec focus max_points =
     (* Sort reference points by distance to the query point *)
     let points_with_dist = List.map (fun p ->
       let angular_dist = calculate_angular_distance ra dec p.mount_ra p.mount_dec in
@@ -117,7 +117,7 @@ end
 	temp_corrected_ra temp_corrected_dec;
 
       (* Find nearest reference points *)
-      let nearest_points = find_nearest_points model mount_ra mount_dec temp focus 3 in
+      let nearest_points = find_nearest_points model mount_ra mount_dec focus 3 in
 
       if List.length nearest_points = 0 then
 	(temp_corrected_ra, temp_corrected_dec)

@@ -1,0 +1,12 @@
+(executable
+  (name altaz_radec_model)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime)
+  (preprocess (pps ppx_deriving_yojson))
+  (modules types fits quaternion pointingModel jsonParser util altaz altaz_to_radec altaz_radec_model))
+ 
+(env
+  (dev
+    (flags (:standard -g -w -27))
+  )
+)
+  

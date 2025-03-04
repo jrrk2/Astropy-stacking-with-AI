@@ -105,7 +105,6 @@ let altaz_to_j2000_time yr mon dy hr min sec alt az latitude longitude =
   let ra_now, dec_now, ha_now = altAztoRaDec alt az latitude longitude lst in
   
   (* Calculate time offset in Julian centuries *)
-  let datum,_ = Unix.mktime {tm_sec=0; tm_min=0; tm_hour=12; tm_mday=1; tm_mon=0; tm_year = 100; tm_wday=0; tm_yday=0; tm_isdst=false} in
   let _T = (jd_calc -. jd_2000) /. 36525.0 in
   
   (* Calculate correction factors *)

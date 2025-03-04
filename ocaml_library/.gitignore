@@ -4,3 +4,5 @@ altaz_model
 model.dat
 pairing.sh
 radec_quat
+_build/
+archive.shar.txt

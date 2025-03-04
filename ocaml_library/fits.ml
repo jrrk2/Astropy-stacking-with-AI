@@ -1,5 +1,4 @@
 (* fits.ml *)
-open Printf
 open Types
 
 (* FITS header block size *)

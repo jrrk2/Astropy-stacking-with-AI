@@ -12,9 +12,9 @@ type astrometry_data = {
     map: int;
     timestamp: float;
     src_file: string;
-  }
+  } [@@deriving yojson]
 
-type qt = { w : float; x : float; y : float; z : float }
+type qt = { w : float; x : float; y : float; z : float } [@@deriving yojson]
 
 type reference_point = {
     mount_ra: float;
@@ -25,13 +25,13 @@ type reference_point = {
     correction: qt;
     timestamp: float;
     src_file: string;
-  }
+  } [@@deriving yojson]
   
 type model = {
     reference_points: reference_point list;
     mutable ra_temp_coeff: float;
     mutable dec_temp_coeff: float;
-  }
+  } [@@deriving yojson]
 
 (* Analysis results *)
 type frame_stats = {
@@ -62,7 +62,7 @@ type wcs_params = {
     cd1_2: float;
     cd2_1: float;
     cd2_2: float;
-}
+} [@@deriving yojson]
 
 (* FITS image information *)
 type image_info = {
@@ -70,13 +70,13 @@ type image_info = {
     height: int;
     wcs: wcs_params;
     filename: string;
-}
+} [@@deriving yojson]
 
 (* Group of images for mosaic processing *)
 type group_info = {
     id: string;
     files: image_info list;
-}
+} [@@deriving yojson]
 
 (* Analysis flags *)
 type analysis_flags = {
@@ -90,7 +90,7 @@ type analysis_flags = {
   mutable base_dir: string;
   mutable json_dir: string option;
   mutable build_model: bool;
-}
+} [@@deriving yojson]
 
 (* Helper for pattern matching on tuples *)
 let fst3 (a, _, _) = a

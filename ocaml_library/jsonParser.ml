@@ -1,6 +1,4 @@
 open Types
-open Printf
-open Plplot
 open Yojson.Basic.Util
 
 (* JSON Parsing module *)

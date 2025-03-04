@@ -1,11 +1,12 @@
 (* Interface between Alt/Az conversion and quaternion pointing model *)
 open Types
 open Util
-open Fits
 open Printf
 open Altaz  (* Import your Alt/Az conversion module *)
 open Altaz_to_radec
 open PointingModel
+
+let j2000 = false
 
 module AltAzIntegration = struct
   type altaz_reference_point = {
@@ -20,6 +21,29 @@ module AltAzIntegration = struct
     timestamp: float;
     src_file: string;
   }
+
+  let store_target target_map latitude longitude file (data:astrometry_data) =
+            (* Store the target RA/DEC with the file directory *)
+            let dir = Filename.dirname file in
+            let fmt1 = match String.split_on_char '_' data.src_file with hd::nxt::tl -> hd^"-"^nxt | _ -> failwith data.src_file in
+            let fmt2 = String.split_on_char '-' fmt1 in
+            Hashtbl.add target_map dir (data.solved_ra, data.solved_dec);
+            let tm = Unix.gmtime (data.timestamp /. 1000.) in
+            let yr,m,dy,hr,min,sec = tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec in
+            let yr',m',dy',hr',min',sec' = match List.map int_of_string fmt2 with yr::m::dy::hr::min::sec::[] -> yr,m,dy,hr,min,sec | _ -> failwith fmt1 in
+            let jd_ut = computeTheJulianDay true yr m dy +. float_of_int(hr*3600+min*60+sec) /. 86400.0 in
+            let jd_ut' = computeTheJulianDay true yr' m' dy' +. float_of_int(hr'*3600+min'*60+sec') /. 86400.0 in
+            let lst = local_siderial_time' longitude (jd_ut -. jd_2000) in
+            let ra_now, dec_now = if j2000 then j2000_to_jnow data.solved_ra data.solved_dec else data.solved_ra, data.solved_dec in
+            let altitude', azimuth', _ = raDectoAltAz ra_now dec_now latitude longitude lst in
+            Printf.printf "lat=%.2f long=%.2f jdate=%.6f jdate'=%.6f ranow=%.4f decnow=%.4f alt'=%.2f az'=%.2f\n" 
+                   latitude longitude jd_ut jd_ut' ra_now dec_now altitude' azimuth';
+            printf "Found target for %s: RA=%.4f, DEC=%.4f, ALT=%.4f, AZ=%.4f\n" 
+              (Filename.basename dir) data.solved_ra data.solved_dec data.alt data.az;
+	    (* Convert back from Alt/Az to RA/Dec *)
+	    let ra_calc, dec_calc, ha_calc = altAztoRaDec altitude' azimuth' latitude longitude lst in
+	    Printf.printf "Calculated RA now: %f Dec: %f\n" ra_calc dec_calc;
+	    Printf.printf "Difference RA now: %f Dec: %f\n" (ra_now -. ra_calc) (dec_now -. dec_calc)
 
   (* Convert an altitude/azimuth reference point to RA/Dec format for the model *)
   let convert_to_radec_reference_point point latitude longitude =
@@ -130,28 +154,7 @@ module AltAzIntegration = struct
     List.iter (fun file ->
       if Filename.basename file = "point-deep-sky.json" then
         match JsonParser.parse_pointing_json file with
-        | Some data ->
-            (* Store the target RA/DEC with the file directory *)
-            let dir = Filename.dirname file in
-            let fmt1 = match String.split_on_char '_' data.src_file with hd::nxt::tl -> hd^"-"^nxt | _ -> failwith data.src_file in
-            let fmt2 = String.split_on_char '-' fmt1 in
-            Hashtbl.add target_map dir (data.solved_ra, data.solved_dec);
-            let tm = Unix.gmtime (data.timestamp /. 1000.) in
-            let yr,m,dy,hr,min,sec = tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec in
-            let yr',m',dy',hr',min',sec' = match List.map int_of_string fmt2 with yr::m::dy::hr::min::sec::[] -> yr,m,dy,hr,min,sec | _ -> failwith fmt1 in
-            let jd_ut = computeTheJulianDay true yr m dy +. float_of_int(hr*3600+min*60+sec) /. 86400.0 in
-            let jd_ut' = computeTheJulianDay true yr' m' dy' +. float_of_int(hr'*3600+min'*60+sec') /. 86400.0 in
-            let lst = local_siderial_time' longitude (jd_ut -. jd_2000) in
-            let ra_now, dec_now = j2000_to_jnow data.solved_ra data.solved_dec in
-            let altitude', azimuth', _ = raDectoAltAz ra_now dec_now latitude longitude lst in
-            Printf.printf "lat=%.2f long=%.2f jdate=%.6f jdate'=%.6f ranow=%.4f decnow=%.4f alt'=%.2f az'=%.2f\n" 
-                   latitude longitude jd_ut jd_ut' ra_now dec_now altitude' azimuth';
-            printf "Found target for %s: RA=%.4f, DEC=%.4f, ALT=%.4f, AZ=%.4f\n" 
-              (Filename.basename dir) data.solved_ra data.solved_dec data.alt data.az;
-	    (* Convert back from Alt/Az to RA/Dec *)
-	    let ra_calc, dec_calc, ha_calc = altAztoRaDec altitude' azimuth' latitude longitude lst in
-	    Printf.printf "Calculated RA now: %f Dec: %f\n" ra_calc dec_calc;
-	    Printf.printf "Difference RA now: %f Dec: %f\n" (ra_now -. ra_calc) (dec_now -. dec_calc);            
+        | Some data -> store_target target_map latitude longitude file data
         | None -> ()
     ) json_files;
     
@@ -329,7 +332,7 @@ let plot_altaz_errors errors =
         let mountaz = parse_float hdrh "AZ" in
         let solvedra = parse_float hdrh "CRVAL1" in
         let solveddec = parse_float hdrh "CRVAL2" in
-        let temp = get_temperature hdrh in
+        let temp = get_temperature hdrh in ignore temp;
         let focus = try int_of_string (Hashtbl.find hdrh "MAP") with _ -> 0 in
         let timestamp = get_timestamp hdrh in
         

@@ -2,31 +2,37 @@ open Types
 open Fits
 open Printf
 open Plplot
-open Yojson.Basic.Util
+(* Add these functions to util.ml *)
 
-(* Function to save model to file using Marshal *)
+(* Function to save model to JSON file *)
 let save_model_to_file model filename =
-  let oc = open_out_bin filename in
-  Marshal.to_channel oc model [];
+  let json = model_to_yojson model in
+  let oc = open_out filename in
+  Printf.fprintf oc "%s\n" (Yojson.Safe.pretty_to_string (json :> Yojson.Safe.t));
   close_out oc;
-  printf "Model saved to %s\n" filename
+  printf "Model saved to JSON file: %s\n" filename
 
-(* Function to load model from file using Marshal *)
+(* Function to load model from JSON file *)
 let load_model_from_file filename =
   try
-    let ic = open_in_bin filename in
-    let model = (Marshal.from_channel ic : model) in
+    let ic = open_in filename in
+    let json = Yojson.Basic.from_channel ic in
     close_in ic;
-    printf "Loaded model from %s with %d reference points\n" 
-      filename (List.length model.reference_points);
-    Some model
+    match model_of_yojson (json :> Yojson.Safe.t) with
+    | Ok model -> 
+        printf "Loaded model from JSON file %s with %d reference points\n" 
+          filename (List.length model.reference_points);
+        Some model
+    | Error msg ->
+        printf "Error parsing model JSON: %s\n" msg;
+        None
   with
   | Sys_error msg -> 
       printf "Error opening model file: %s\n" msg;
       None
   | e -> 
       printf "Error loading model file: %s\n" (Printexc.to_string e);
-      None    
+      None
 
 (* Extract temperature from FITS header *)
 let get_temperature hdrh =
