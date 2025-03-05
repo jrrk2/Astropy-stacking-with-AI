@@ -83,10 +83,12 @@ let copy_fits_with_updates source_path target_path updates =
     ) required;
 
     (* Add all header entries except END *)
+    let sortlst = ref [] in
     Hashtbl.iter (fun key value ->
-      if not (List.mem key required) && key <> "END" then dumprec key value
+      if not (List.mem key required) && key <> "END" then sortlst := (key, value) :: !sortlst
     ) hdrh;
-    
+    List.iter (fun (key,value) -> dumprec key value) (List.sort compare !sortlst);
+
     (* Add END record *)
     let end_record = "END" in
     Bytes.blit_string end_record 0 new_header !pos (String.length end_record);

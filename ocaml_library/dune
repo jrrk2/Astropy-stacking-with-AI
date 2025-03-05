@@ -1,19 +1,39 @@
 (executable
   (name stellina_process)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types)
-  (preprocess (pps lwt_ppx))
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules fits util jsonParser quaternion pointingModel pointing_integration 
-           altaz altaz_to_radec astro_utils simbad query_simbad stellina_process))
+           altaz altaz_to_radec simbad query_simbad stellina_process))
  
 (executable
   (name altaz_radec_model)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model))
+ 
+(executable
+  (name unified_cli)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface simbad query_simbad))
+ 
+(executable
+  (name integration_examples)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface simbad query_simbad integration_examples))
+ 
+(executable
+  (name simbad_main)
+  (libraries str unix cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
+  (modules altaz altaz_to_radec simbad query_simbad simbad_main))
 
 (library
   (name types)
   (preprocess (pps ppx_deriving_yojson))
   (modules types))
+
+(library
+  (name astro_utils)
+  (libraries str unix yojson cohttp lwt cohttp-lwt-unix)
+  (preprocess (pps lwt_ppx))
+  (modules astro_utils))
   
 (env
   (dev

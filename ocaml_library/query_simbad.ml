@@ -20,10 +20,7 @@ let log_info msg =
 (* Query SIMBAD for an object *)
 let query_simbad target =
   result_ref := None;
-  simbad_main log_info simbad_callback target;
-  
-  (* Give some time for the async operation to complete *)
-  Unix.sleepf 0.5;
+  Lwt_main.run (simbad' log_info simbad_callback target);
   
   (* Get the result *)
   Mutex.lock result_mutex;
@@ -57,20 +54,5 @@ let get_object_coordinates name =
          | None -> "");
       Some (result.ra_deg, result.dec_deg)
   | None -> 
-      (* Fallback for common objects if SIMBAD fails *)
-      match String.uppercase_ascii name with
-      | "M51" -> 
-          let ra, dec = 202.4696, 47.1953 in
-          printf "Using hardcoded coordinates for M51: RA=%.4f°, Dec=%.4f°\n" ra dec;
-          Some (ra, dec)
-      | "M31" -> 
-          let ra, dec = 10.6847, 41.2687 in
-          printf "Using hardcoded coordinates for M31: RA=%.4f°, Dec=%.4f°\n" ra dec;
-          Some (ra, dec)
-      | "M42" -> 
-          let ra, dec = 83.8221, -5.3911 in
-          printf "Using hardcoded coordinates for M42: RA=%.4f°, Dec=%.4f°\n" ra dec;
-          Some (ra, dec)
-      | _ -> 
-          printf "Could not find coordinates for %s\n" name;
-          None
+      printf "Could not find coordinates for %s\n" name;
+      None

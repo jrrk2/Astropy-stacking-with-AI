@@ -2,9 +2,24 @@ open Cohttp
 open Cohttp_lwt_unix
 (*
 open Cohttp_lwt_jsoo
-*) 
 open Altaz
+*) 
 open Lwt.Infix
+
+let (%.) = mod_float
+
+let cnv_ra fmt =
+    try Scanf.sscanf fmt "%f %f %f" (fun a b c -> a *. 15.0 +. b /. 4.0 +. c /. 240.0)
+    with _ -> try Scanf.sscanf fmt "%f %f" (fun a b -> a *. 15.0 +. b /. 4.0) with _ -> 0.0
+
+let cnv_hms fmt =
+    try Scanf.sscanf fmt "%fh%fm%fs" (fun a b c -> a *. 15.0 +. b /. 4.0 +. c /. 240.0) with _ -> 0.0
+
+let cnv_dec fmt =
+    let neg = fmt <> "" && fmt.[0] = '-' in
+    try Scanf.sscanf fmt "%f %f %f" (fun a b c -> if neg then a -. b /. 60.0 -. c /. 3600.0 else a +. b /. 60.0 +. c /. 3600.0)
+    with _ -> try Scanf.sscanf fmt "%f %f" (fun a b -> if neg then a -. b /. 60.0 else a +. b /. 60.0)
+    with _ -> try float_of_string fmt with _ -> 0.0
 
 let send_preflight_options_request uri callback =
   let headers = Header.init () in
@@ -91,6 +106,10 @@ let post' proto server params headers pth form f =
 
 let tmpdir = (Filename.get_temp_dir_name ())^"/"
 
+let mystring_of_float x =
+  let str = string_of_float x in
+  if str.[String.length str - 1] = '.' then str^"0" else str
+
 let gain_int () = 200
 (* hardwired until we get cookies going *)
 let datum () = Unix.gettimeofday()
@@ -150,6 +169,25 @@ let tbuffer_apply_tag_by_name nam ~start ~stop = ()
 let tim_6_set_text txt = ()
 let tim_7_set_text txt = ()
 
+let hms_of_float x' =
+    let neg = x' < 0.0 in
+    let x = if neg then x' +. 360.0 else x' in
+    let x15 = x /. 15.0 in
+    let h = floor (x15) in
+    let m' = (x15 -. h) *. 60.0 in
+    let m = floor (m') in
+    let s = (m' -. m) *. 60.0 in
+    if Float.is_nan x' then "nan" else Printf.sprintf "%.2d %.2d %.2d" (int_of_float h) (int_of_float m) (int_of_float s)
+
+let dms_of_float x' =
+    let neg = x' < 0.0 in
+    let x = if neg then -. x' else x' in
+    let d = floor (x) in
+    let m' = (x -. d) *. 60.0 in
+    let m = floor (m') in
+    let s = (m' -. m) *. 60.0 in
+    if Float.is_nan x' then "nan" else Printf.sprintf "%c%.2d %.2d %.2d" (if neg then '-' else '+') (int_of_float d) (int_of_float m) (int_of_float s)
+
 let split_date () =
     let tm = Unix.gmtime (datum()) in
     tm.tm_year+1900,tm.tm_mon+1,tm.tm_mday,tm.tm_hour,tm.tm_min,tm.tm_sec
@@ -192,6 +230,10 @@ type attr =
   }
 
 let stellarium_enabled_active() = true
+
+let mod_ha ha =
+  let _HA = ha %. 24.0 -. 24.0 in
+  if _HA < -12.0 then _HA +. 24.0 else _HA
 
 let rec descend' attr = function
 | ("raJ2000", `Float f) -> attr.ra <- f; attr.ra_hms <- hms_of_float f

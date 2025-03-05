@@ -1,10 +1,12 @@
-open Altaz
 open Xml
+open Astro_utils
 
 type err =
 | Error of string
 | Found of string * float * float * float
 | Unmatched of xml
+
+let verbose = try bool_of_string (Sys.getenv "SIMBAD_VERBOSE") with _ -> false
 
 let rec dump show_info = function
         | Xml.Element (kw, attr, lst) ->
@@ -82,8 +84,8 @@ let rec simbad_cnv show_info (callback:err->unit) = function
                     Element ("TD", [], [PCData dec]);
                     Element ("TD", [], []);
 		    Element ("TD", [], [])])])])])])]) ->
-    print_endline ("RA: "^ra);
-    print_endline ("DEC: "^dec);
+    if verbose then print_endline ("RA: "^ra);
+    if verbose then print_endline ("DEC: "^dec);
     let ra_flt = cnv_ra ra in
     let dec_flt = cnv_dec dec in
     let mag_flt = nan in
