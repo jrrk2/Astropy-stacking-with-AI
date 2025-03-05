@@ -20,6 +20,8 @@ end
     reference_points = [];
     ra_temp_coeff = 0.0;
     dec_temp_coeff = 0.0;
+    latitude = 0.0;
+    longitude = 0.0;
   }
   
   (* Create a correction quaternion from RA/DEC errors *)

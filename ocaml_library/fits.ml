@@ -1,5 +1,6 @@
 (* fits.ml *)
 open Types
+open Printf
 
 (* FITS header block size *)
 let block_size = 2880
@@ -157,3 +158,122 @@ let just_header filename =
 	let () = scan_header hdrh (read_header fd "") 0 in
 	close_in fd;        
         hdrh
+
+(* Properly parse FITS header string value by removing quotes and comments *)
+let parse_string_header hdrh key =
+  try
+    let value = Hashtbl.find hdrh key in
+    let value = String.trim value in
+    (* Remove quotes if present *)
+    let value = 
+      if String.length value > 2 && value.[0] = '\'' && value.[String.length value - 1] = '\'' then
+        String.sub value 1 (String.length value - 2)
+      else value
+    in
+    (* Remove comment if present *)
+    match String.index_opt value '/' with
+    | Some idx -> String.trim (String.sub value 0 idx)
+    | None -> value
+  with Not_found -> ""
+
+(* Create directories recursively *)
+let rec create_dir d =
+  if not (Sys.file_exists d) then begin
+    create_dir (Filename.dirname d);
+    try
+      Unix.mkdir d 0o755;
+      printf "  Created directory: %s\n" d
+    with e ->
+      eprintf "  Error creating directory %s: %s\n" d (Printexc.to_string e)
+  end else if not (Sys.is_directory d) then
+    eprintf "  Warning: %s exists but is not a directory\n" d
+
+(* Copy FITS file with header updates *)
+let copy_fits_with_updates source_path target_path updates =
+  try
+    (* Make sure source exists *)
+    if not (Sys.file_exists source_path) then
+      failwith (Printf.sprintf "Source file %s doesn't exist" source_path);
+      
+    (* Create target directory if needed *)
+    let target_dir = Filename.dirname target_path in
+    if not (Sys.file_exists target_dir) then
+      create_dir target_dir;
+    
+    Printf.printf "  Copying %s to %s with header updates\n" source_path target_path;
+    
+    (* Get existing header *)
+    let hdrh = just_header source_path in
+    
+    (* Apply updates to header hash table *)
+    List.iter (fun (keyword, value, comment) ->
+      let formatted = Printf.sprintf " = %s / %s" value comment in
+      Hashtbl.replace hdrh keyword formatted
+    ) updates;
+    
+    (* Read original header to determine its size *)
+    let fd = open_in_bin source_path in
+    let header = read_header fd "" in
+    
+    (* Create new header string from hash table *)
+    let new_header = Bytes.create (((String.length header / 2880) + 1) * 2880) in
+    Bytes.fill new_header 0 (Bytes.length new_header) ' ';
+
+    let pos = ref 0 in
+    let required = ["SIMPLE";"BITPIX";"NAXIS";"NAXIS1";"NAXIS2"] in
+    let dumprec key value' =
+        Bytes.blit_string key 0 new_header !pos (String.length key);
+        Bytes.set new_header (!pos + 8) '=';
+        let value = try let eq = String.index value' '=' + 1 in String.sub value' eq (String.length value' - eq) with _ -> value' in
+        let len = min (String.length value) 71 in
+        Bytes.blit_string value 0 new_header (!pos+9) len;
+        pos := !pos + 80 in
+
+    (* Add required keyword records *)
+    List.iter (fun key ->
+    let value = Hashtbl.find hdrh key in dumprec key value
+    ) required;
+
+    (* Add all header entries except END *)
+    let sortlst = ref [] in
+    Hashtbl.iter (fun key value ->
+      if not (List.mem key required) && key <> "END" then sortlst := (key, value) :: !sortlst
+    ) hdrh;
+    List.iter (fun (key,value) -> dumprec key value) (List.sort compare !sortlst);
+
+    (* Add END record *)
+    let end_record = "END" in
+    Bytes.blit_string end_record 0 new_header !pos (String.length end_record);
+    pos := !pos + 80;
+    
+    (* Ensure header is multiple of 2880 bytes *)
+    let header_size = ((!pos + 2879) / 2880) * 2880 in
+    
+    (* Open output file *)
+    let out_fd = open_out_bin target_path in
+    
+    (* Write new header *)
+    output out_fd new_header 0 header_size;
+    
+    (* Copy data portion from original file *)
+    let in_fd = open_in_bin source_path in
+    let _ = input in_fd (Bytes.create (String.length header)) 0 (String.length header) in  (* Skip original header *)
+    
+    let buffer_size = 8192 in
+    let buffer = Bytes.create buffer_size in
+    let rec copy_data () =
+      let n = input in_fd buffer 0 buffer_size in
+      if n > 0 then begin
+        output out_fd buffer 0 n;
+        copy_data ()
+      end
+    in
+    copy_data ();
+    
+    close_in in_fd;
+    close_out out_fd;
+    
+    true
+  with e ->
+    Printf.eprintf "Error copying file with updates: %s\n" (Printexc.to_string e);
+    false

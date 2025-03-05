@@ -31,6 +31,8 @@ type model = {
     reference_points: reference_point list;
     mutable ra_temp_coeff: float;
     mutable dec_temp_coeff: float;
+    latitude: float;
+    longitude: float;
   } [@@deriving yojson]
 
 (* Analysis results *)
