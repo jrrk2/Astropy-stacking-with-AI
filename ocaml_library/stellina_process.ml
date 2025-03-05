@@ -24,37 +24,105 @@ let parse_string_header hdrh key =
     | None -> value
   with Not_found -> ""
 
-(* Copy a file using OCaml's built-in I/O instead of system commands *)
-let copy_file source target =
-  try
-    printf "  Copying %s to %s\n" source target;
-    let chunk_size = 8192 in
-    let buffer = Bytes.create chunk_size in
-    
-    let ic = open_in_bin source in
-    let oc = open_out_bin target in
-    
-    let rec copy_loop () =
-      match input ic buffer 0 chunk_size with
-      | 0 -> ()  (* End of file *)
-      | n -> 
-          output oc buffer 0 n;
-          copy_loop ()
-    in
-    
+(* Create directories recursively *)
+let rec create_dir d =
+  if not (Sys.file_exists d) then begin
+    create_dir (Filename.dirname d);
     try
-      copy_loop ();
-      close_in ic;
-      close_out oc;
-      true
+      Unix.mkdir d 0o755;
+      printf "  Created directory: %s\n" d
     with e ->
-      close_in_noerr ic;
-      close_out_noerr oc;
-      raise e
-  with
-  | e ->
-      eprintf "  Error copying file: %s\n" (Printexc.to_string e);
-      false
+      eprintf "  Error creating directory %s: %s\n" d (Printexc.to_string e)
+  end else if not (Sys.is_directory d) then
+    eprintf "  Warning: %s exists but is not a directory\n" d
+
+(* Copy FITS file with header updates *)
+let copy_fits_with_updates source_path target_path updates =
+  try
+    (* Make sure source exists *)
+    if not (Sys.file_exists source_path) then
+      failwith (Printf.sprintf "Source file %s doesn't exist" source_path);
+      
+    (* Create target directory if needed *)
+    let target_dir = Filename.dirname target_path in
+    if not (Sys.file_exists target_dir) then
+      create_dir target_dir;
+    
+    Printf.printf "  Copying %s to %s with header updates\n" source_path target_path;
+    
+    (* Get existing header *)
+    let hdrh = Fits.just_header source_path in
+    
+    (* Apply updates to header hash table *)
+    List.iter (fun (keyword, value, comment) ->
+      let formatted = Printf.sprintf " = %s / %s" value comment in
+      Hashtbl.replace hdrh keyword formatted
+    ) updates;
+    
+    (* Read original header to determine its size *)
+    let fd = open_in_bin source_path in
+    let header = Fits.read_header fd "" in
+    
+    (* Create new header string from hash table *)
+    let new_header = Bytes.create (((String.length header / 2880) + 1) * 2880) in
+    Bytes.fill new_header 0 (Bytes.length new_header) ' ';
+
+    let pos = ref 0 in
+    let required = ["SIMPLE";"BITPIX";"NAXIS";"NAXIS1";"NAXIS2"] in
+    let dumprec key value' =
+        Bytes.blit_string key 0 new_header !pos (String.length key);
+        Bytes.set new_header (!pos + 8) '=';
+        let value = try let eq = String.index value' '=' + 1 in String.sub value' eq (String.length value' - eq) with _ -> value' in
+        let len = min (String.length value) 71 in
+        Bytes.blit_string value 0 new_header (!pos+9) len;
+        pos := !pos + 80 in
+
+    (* Add required keyword records *)
+    List.iter (fun key ->
+    let value = Hashtbl.find hdrh key in dumprec key value
+    ) required;
+
+    (* Add all header entries except END *)
+    Hashtbl.iter (fun key value ->
+      if not (List.mem key required) && key <> "END" then dumprec key value
+    ) hdrh;
+    
+    (* Add END record *)
+    let end_record = "END" in
+    Bytes.blit_string end_record 0 new_header !pos (String.length end_record);
+    pos := !pos + 80;
+    
+    (* Ensure header is multiple of 2880 bytes *)
+    let header_size = ((!pos + 2879) / 2880) * 2880 in
+    
+    (* Open output file *)
+    let out_fd = open_out_bin target_path in
+    
+    (* Write new header *)
+    output out_fd new_header 0 header_size;
+    
+    (* Copy data portion from original file *)
+    let in_fd = open_in_bin source_path in
+    let _ = input in_fd (Bytes.create (String.length header)) 0 (String.length header) in  (* Skip original header *)
+    
+    let buffer_size = 8192 in
+    let buffer = Bytes.create buffer_size in
+    let rec copy_data () =
+      let n = input in_fd buffer 0 buffer_size in
+      if n > 0 then begin
+        output out_fd buffer 0 n;
+        copy_data ()
+      end
+    in
+    copy_data ();
+    
+    close_in in_fd;
+    close_out out_fd;
+    
+    true
+  with e ->
+    Printf.eprintf "Error copying file with updates: %s\n" (Printexc.to_string e);
+    false
 
 (* Determine new filepath with fixed Bayer pattern handling *)
 let get_new_filepath fits_path ?(base_dir="lights") ?(calibrated=false) () =
@@ -115,18 +183,6 @@ let get_new_filepath fits_path ?(base_dir="lights") ?(calibrated=false) () =
   | e -> 
       eprintf "Error determining new path: %s\n" (Printexc.to_string e);
       None
-
-(* Create directories recursively *)
-let rec create_dir d =
-  if not (Sys.file_exists d) then begin
-    create_dir (Filename.dirname d);
-    try
-      Unix.mkdir d 0o755;
-      printf "  Created directory: %s\n" d
-    with e ->
-      eprintf "  Error creating directory %s: %s\n" d (Printexc.to_string e)
-  end else if not (Sys.is_directory d) then
-    eprintf "  Warning: %s exists but is not a directory\n" d
 
 (* Verify coordinates are close to target object *)
 let verify_coordinates calc_ra calc_dec target_name ?(max_separation_deg=1.0) () =
@@ -352,36 +408,32 @@ let process_directory src_dir ?(base_dir="lights") ?(target_name=None)
                 
                 (* Copy file if doesn't exist *)
                 if not (Sys.file_exists new_path) then begin
-                  if copy_file fits_file new_path then begin
-                    printf "  Successfully copied file\n";
-                    
-                    (* Annotate with JSON data - simplified for now *)
-                    if annotate_fits_from_json json_file new_path pointing_model then begin
-                      printf "  Created and annotated %s\n" new_path;
-                      processed := !processed + 1;
-                      
-                      (* Add registration attributes if available *)
-                      if add_registration && observation_json_path <> None then begin
-                        let reg_path = Option.get observation_json_path in
-                        if Sys.file_exists reg_path then begin
-                          if annotate_fits_from_json reg_path new_path None then begin
-                            printf "  Added registration attributes\n";
-                            registration_added := !registration_added + 1
-                          end else begin
-                            printf "  Failed to add registration attributes\n";
-                            registration_failed := !registration_failed + 1
-                          end
-                        end else
-                          printf "  Observation.json not found at %s\n" reg_path
-                      end
-                    end else begin
-                      eprintf "  Failed to annotate FITS file\n";
-                      errors := !errors + 1
-                    end
-                  end else begin
-                    eprintf "  Failed to copy file\n";
-                    errors := !errors + 1
-                  end
+		  (* Parse JSON data to extract values for headers *)
+		  let json = Yojson.Basic.from_file json_file in
+		  let open Yojson.Basic.Util in
+		  let motors = json |> member "motors" in
+		  let alt = motors |> member "ALT" |> to_float in
+		  let az = motors |> member "AZ" |> to_float in
+
+		  (* Calculate RA/Dec from Alt/Az *)
+		  let ra, dec = Altaz_to_radec.altaz_to_j2000 alt az 52.2 0.12 in
+
+		  (* Create updates list *)
+		  let updates = [
+		    ("MOUNTRA", Printf.sprintf "%f" ra, "Mount RA (deg)");
+		    ("MOUNTDEC", Printf.sprintf "%f" dec, "Mount DEC (deg)");
+		    ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
+		    ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
+		    (* Add other fields as needed *)
+		  ] in
+
+		  if copy_fits_with_updates fits_file new_path updates then begin
+		    printf "  Created and annotated %s\n" new_path;
+		    processed := !processed + 1;
+		  end else begin
+		    eprintf "  Failed to copy and annotate FITS file\n";
+		    errors := !errors + 1
+		  end
                 end else begin
                   printf "  Skipped - file already exists\n";
                   skipped := !skipped + 1
