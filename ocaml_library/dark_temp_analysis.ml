@@ -54,7 +54,7 @@ let get_temperature hdrh =
           (parse_float hdrh "TEMP_K") -. 273.15
             with _ ->
               failwith "Could not find temperature in FITS header"
-
+;;
 (* Quick scan of just the FITS header *)
 let scan_fits_temperature filename =
   let fd = open_in_bin filename in

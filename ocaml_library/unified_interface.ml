@@ -13,6 +13,10 @@ module Util = Util
 module JsonParser = JsonParser
 module Quaternion = Quaternion
 module QuerySimbad = Query_simbad
+module DarkCalibration = Dark_calibration
+
+(* Export function to process with calibration *)
+let process_with_calibration = DarkCalibration.process_with_calibration
 
 (* Simple record type to hold coordinate conversion context *)
 type conversion_context = {

@@ -23,8 +23,18 @@ let main () =
   (* Options for noise analysis *)
   let single_file = ref "" in
   let star_detection_threshold = ref 5.0 in
+  (* Options for dark calibration *)
+  let dark_dir = ref "" in
+  let output_dir = ref "calibrated" in
+  let temp_tolerance = ref 2.0 in
+  let force_rebuild = ref false in
+  let apply_only = ref false in
+  let master_dark_dir = ref "master_darks" in
   
-  let usage = "Usage: unified_cli [options] action\n\nActions:\n  help - Show this help message\n  convert - Convert coordinates\n  lookup - Look up object in SIMBAD\n  analyze - Analyze pointing data\n  analyze-noise - Analyze image noise\n  build - Build pointing model\n  correct - Apply pointing correction" in
+  let usage = "Usage: unified_cli [options] action\n\nActions:\n  help - Show this help m
+essage\n  convert - Convert coordinates\n  lookup - Look up object in SIMBAD\n  analyze - 
+Analyze pointing data\n  analyze-noise - Analyze image noise\n  build - Build pointing mod
+el\n  correct - Apply pointing correction\n  calibrate - Create/apply dark calibration" in
   
   let specs = [
     ("-fits", Arg.Set_string fits_dir, "Directory containing FITS files");
@@ -41,6 +51,14 @@ let main () =
     ("-focus", Arg.Set_int focus, "Focus position for model");
     ("-file", Arg.Set_string single_file, "Single FITS file for analysis");
     ("-threshold", Arg.Set_float star_detection_threshold, "Star detection threshold (default: 5.0)");
+    (* Dark calibration options *)
+    ("-dark", Arg.Set_string dark_dir, "Directory containing dark frames");
+    ("-out", Arg.Set_string output_dir, "Output directory for calibrated images");
+    ("-temp-tol", Arg.Set_float temp_tolerance, "Temperature tolerance in °C");
+    ("-force", Arg.Set force_rebuild, "Force rebuild of master darks");
+    ("-apply", Arg.Set apply_only, "Apply calibration only (don't create masters)");
+    ("-master-dir", Arg.Set_string master_dark_dir, "Directory for master dark frames");
+
     ("-v", Arg.Set verbose, "Verbose output");
   ] in
   
