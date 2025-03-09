@@ -20,8 +20,11 @@ let main () =
   let az = ref 0.0 in
   let focus = ref 0 in
   let verbose = ref false in
+  (* Options for noise analysis *)
+  let single_file = ref "" in
+  let star_detection_threshold = ref 5.0 in
   
-  let usage = "Usage: unified_cli [options] action\n\nActions:\n  help - Show this help message\n  convert - Convert coordinates\n  lookup - Look up object in SIMBAD\n  analyze - Analyze pointing data\n  build - Build pointing model\n  correct - Apply pointing correction" in
+  let usage = "Usage: unified_cli [options] action\n\nActions:\n  help - Show this help message\n  convert - Convert coordinates\n  lookup - Look up object in SIMBAD\n  analyze - Analyze pointing data\n  analyze-noise - Analyze image noise\n  build - Build pointing model\n  correct - Apply pointing correction" in
   
   let specs = [
     ("-fits", Arg.Set_string fits_dir, "Directory containing FITS files");
@@ -36,6 +39,8 @@ let main () =
     ("-alt", Arg.Set_float alt, "Altitude in degrees");
     ("-az", Arg.Set_float az, "Azimuth in degrees");
     ("-focus", Arg.Set_int focus, "Focus position for model");
+    ("-file", Arg.Set_string single_file, "Single FITS file for analysis");
+    ("-threshold", Arg.Set_float star_detection_threshold, "Star detection threshold (default: 5.0)");
     ("-v", Arg.Set verbose, "Verbose output");
   ] in
   
@@ -118,6 +123,37 @@ let main () =
         
         printf "Successfully extracted data from %d files\n" (Array.length data);
         analyze_pointing data true
+      end
+      
+  | "analyze-noise" ->
+      (* Handle noise analysis action *)
+      if !single_file <> "" then begin
+        (* Analyze a single file *)
+        printf "Analyzing noise in: %s\n" !single_file;
+        let rslt = analyze_image_noise !single_file !star_detection_threshold in print_endline (string_of_bool rslt)
+      end else if !fits_dir <> "" then begin
+        (* Analyze all files in directory *)
+        let files = try
+          Array.map (fun f -> Filename.concat !fits_dir f)
+                   (Array.of_list (List.filter (fun f -> 
+                      Filename.check_suffix f ".fits" || 
+                      Filename.check_suffix f ".fit") 
+                    (Array.to_list (Sys.readdir !fits_dir))))
+        with _ -> 
+          printf "Error reading directory %s\n" !fits_dir;
+          [||]
+        in
+        
+        printf "Found %d FITS files in %s for noise analysis\n" (Array.length files) !fits_dir;
+        
+        if Array.length files > 0 then
+          let rslt = analyze_directory_noise files !star_detection_threshold in print_endline (string_of_bool rslt)
+        else
+          printf "No FITS files found to analyze\n"
+      end else begin
+        printf "Error: Must specify either a single file with -file or a directory with -fits\n";
+        printf "Example: unified_cli -file \"image.fits\" analyze-noise\n";
+        printf "      or unified_cli -fits \"/path/to/fits\" analyze-noise\n";
       end
       
   | "build" ->

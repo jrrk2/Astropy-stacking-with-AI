@@ -37,7 +37,6 @@ let rec scan_header hdrh header pos =
 				(80 - String.length oth));
 	    scan_header hdrh header (pos + 80)
 
-(*
 (* Read entire FITS file *)
 let read_image image =
     let rs = ref "" in
@@ -45,7 +44,6 @@ let read_image image =
     (try rs := really_input_string fd (in_channel_length fd) with End_of_file -> ());
     close_in fd;
     !rs
-*)
 
 (* Parse FITS header, return header hashtable and data start *)
 let find_header_end filename data =
