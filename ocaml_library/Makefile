@@ -2,7 +2,8 @@ O1 = types.ml fits.ml quaternion.ml pointingModel.ml jsonParser.ml util.ml enhan
 O2 = types.ml fits.ml quaternion.ml pointingModel.ml jsonParser.ml util.ml altaz.ml altaz_to_radec.ml altaz_radec_model.ml
 FLAGS = -g -package yojson,plplot,str,unix,ppx_deriving_yojson,ppx_deriving.std -linkpkg
 
-all: ./radec_quat ./altaz_model
+all:
+	@echo make calibrate
 
 # Usage: ./radec_quat -json /Volumes/X10Pro/Stellina/2025-02-25_18-50-57_plan_My_plan/01-observation-m101 -model -save model.dat
 
@@ -13,3 +14,10 @@ all: ./radec_quat ./altaz_model
 
 ./altaz_model: $(O2)
 	ocamlfind ocamlopt $(FLAGS) $(O2) -o $@
+
+calibrate: 
+	-@rm -rf calibrated
+	_build/default/dark_stack.exe -dark ../../dark_temps/temp_285 -light /Volumes/X10Pro/stellina-5df04c/2025-02-17_20-42-14_observation_M42/02-images-initial
+
+stack1:
+	env OCAMLRUNPARAM=b _build/default/stack_calibrated.exe calibrated

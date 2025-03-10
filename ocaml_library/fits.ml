@@ -205,7 +205,8 @@ let write_rgb_data_to_fits output_path hdrh rgb_data =
     Hashtbl.replace hdrh "BITPIX" (sprintf " = 16 / 16-bit integers");
     Hashtbl.replace hdrh "BZERO" (sprintf " = 32768 / Offset to unsigned short range");
     Hashtbl.replace hdrh "BSCALE" (sprintf " = 1 / Default scaling factor");
-    
+    Hashtbl.remove hdrh "BAYERPAT=";
+
     (* Open output file *)
     let out_fd = open_out_bin output_path in
     

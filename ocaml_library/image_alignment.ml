@@ -46,7 +46,7 @@ type stacking_result = {
 let default_detection_params = {
   threshold = 5.0;
   min_separation = 10;
-  max_stars = 100;
+  max_stars = 1000;
 }
 
 (* Create identity transformation parameters (no change) *)
