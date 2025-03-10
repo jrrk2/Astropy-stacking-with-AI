@@ -3,44 +3,7 @@
 open Types
 open Fits
 open Printf
-
-(* Types for star detection and alignment *)
-type star_point = {
-  x: float;          (* X coordinate in pixels *)
-  y: float;          (* Y coordinate in pixels *)
-  flux: float;       (* Integrated flux (brightness) *)
-  fwhm: float;       (* Full-width half-maximum (star size) *)
-}
-
-type alignment_parameters = {
-  dx: float;         (* X translation *)
-  dy: float;         (* Y translation *)
-  rotation: float;   (* Rotation angle in radians *)
-  scale: float;      (* Scale factor *)
-}
-
-type stacking_method = 
-  | Average           (* Simple mean stacking *)
-  | Median            (* Median stacking - good for cosmic ray rejection *)
-  | SigmaClip of float (* Sigma-clipped mean with given sigma threshold *)
-  | Kappa of float    (* Kappa-sigma clipping with rejection threshold *)
-  | WeightedAverage   (* Weighted by image quality *)
-
-(* Star detection parameters *)
-type detection_params = {
-  threshold: float;   (* Detection threshold in sigma above background *)
-  min_separation: int; (* Minimum separation between stars in pixels *)
-  max_stars: int;     (* Maximum number of stars to use for alignment *)
-}
-
-(* Result of the stacking operation *)
-type stacking_result = {
-  reference_image: string;         (* Filename of reference image *)
-  aligned_images: string array;    (* Filenames of successfully aligned images *)
-  failed_images: string array;     (* Filenames of images that failed to align *)
-  stacking_method: stacking_method; (* Method used for stacking *)
-  output_file: string;            (* Path to output stacked image *)
-}
+open Fft_alignment
 
 (* Default parameters for star detection *)
 let default_detection_params = {
@@ -49,13 +12,132 @@ let default_detection_params = {
   max_stars = 1000;
 }
 
-(* Create identity transformation parameters (no change) *)
-let identity_transform = {
-  dx = 0.0;
-  dy = 0.0;
-  rotation = 0.0;
-  scale = 1.0;
-}
+(* Improved alignment code to insert into image_alignment.ml *)
+
+(* Enhanced star matching with RANSAC for robust alignment *)
+let match_star_patterns ref_stars target_stars max_iterations =
+  if List.length ref_stars < 3 || List.length target_stars < 3 then
+    None
+  else
+    (* Use brightest stars for initial matching *)
+    let ref_sorted = List.sort (fun s1 s2 -> compare s2.flux s1.flux) ref_stars in
+    let target_sorted = List.sort (fun s1 s2 -> compare s2.flux s1.flux) target_stars in
+    
+    (* Take top N stars *)
+    let n_bright = min 30 (min (List.length ref_sorted) (List.length target_sorted)) in
+    let ref_bright = Array.of_list (List.take n_bright ref_sorted) in
+    let target_bright = Array.of_list (List.take n_bright target_sorted) in
+    
+    (* RANSAC algorithm for robust model estimation *)
+    let best_model = ref None in
+    let best_inliers = ref 0 in
+    let best_error = ref infinity in
+    
+    for _ = 1 to max_iterations do
+      (* Randomly select 3 pairs of stars *)
+      let idx1 = Random.int n_bright in
+      let idx2 = Random.int n_bright in
+      let idx3 = Random.int n_bright in
+      
+      (* Ensure we have 3 different indices *)
+      if idx1 <> idx2 && idx2 <> idx3 && idx1 <> idx3 then
+        (* Get star coordinates *)
+        let r1 = ref_bright.(idx1) in
+        let r2 = ref_bright.(idx2) in
+        let r3 = ref_bright.(idx3) in
+        
+        let t1 = target_bright.(idx1) in
+        let t2 = target_bright.(idx2) in
+        let t3 = target_bright.(idx3) in
+        
+        (* Calculate centroid *)
+        let rx_sum = r1.x +. r2.x +. r3.x in
+        let ry_sum = r1.y +. r2.y +. r3.y in
+        let tx_sum = t1.x +. t2.x +. t3.x in
+        let ty_sum = t1.y +. t2.y +. t3.y in
+        
+        let rx_center = rx_sum /. 3.0 in
+        let ry_center = ry_sum /. 3.0 in
+        let tx_center = tx_sum /. 3.0 in
+        let ty_center = ty_sum /. 3.0 in
+        
+        (* Shift to center for rotation/scale calculation *)
+        let r1x = r1.x -. rx_center in
+        let r1y = r1.y -. ry_center in
+        let r2x = r2.x -. rx_center in
+        let r2y = r2.y -. ry_center in
+        let r3x = r3.x -. rx_center in
+        let r3y = r3.y -. ry_center in
+        
+        let t1x = t1.x -. tx_center in
+        let t1y = t1.y -. ty_center in
+        let t2x = t2.x -. tx_center in
+        let t2y = t2.y -. ty_center in
+        let t3x = t3.x -. tx_center in
+        let t3y = t3.y -. ty_center in
+        
+        (* Calculate rotation and scale using least squares *)
+        (* First compute the scaled rotation matrix elements *)
+        let a = r1x *. t1x +. r2x *. t2x +. r3x *. t3x in
+        let b = r1x *. t1y +. r2x *. t2y +. r3x *. t3y in
+        let c = r1y *. t1x +. r2y *. t2x +. r3y *. t3x in
+        let d = r1y *. t1y +. r2y *. t2y +. r3y *. t3y in
+        
+        let denominator = r1x *. r1x +. r1y *. r1y +. 
+                         r2x *. r2x +. r2y *. r2y +. 
+                         r3x *. r3x +. r3y *. r3y in
+        
+        if denominator > 0.0 then
+          (* Compute rotation and scale *)
+          let s_cos = (a +. d) /. denominator in
+          let s_sin = (c -. b) /. denominator in
+          
+          let scale = sqrt (s_cos *. s_cos +. s_sin *. s_sin) in
+          let rotation = atan2 s_sin s_cos in
+          
+          (* Compute translation *)
+          let dx = tx_center -. (scale *. (rx_center *. cos rotation -. ry_center *. sin rotation)) in
+          let dy = ty_center -. (scale *. (rx_center *. sin rotation +. ry_center *. cos rotation)) in
+          
+          (* Create transformation model *)
+          let model = { dx; dy; rotation; scale } in
+          
+          (* Count inliers *)
+          let inliers = ref 0 in
+          let total_error = ref 0.0 in
+          
+          for i = 0 to n_bright - 1 do
+            let rx = ref_bright.(i).x in
+            let ry = ref_bright.(i).y in
+            
+            (* Apply transform *)
+            let tx_rot = scale *. (rx *. cos rotation -. ry *. sin rotation) +. dx in
+            let ty_rot = scale *. (rx *. sin rotation +. ry *. cos rotation) +. dy in
+            
+            (* Compare with actual target position *)
+            let tx_actual = target_bright.(i).x in
+            let ty_actual = target_bright.(i).y in
+            
+            let dist_sq = (tx_rot -. tx_actual) ** 2.0 +. (ty_rot -. ty_actual) ** 2.0 in
+            
+            (* Threshold for inliers *)
+            if dist_sq < 10.0 ** 2.0 then begin
+              incr inliers;
+              total_error := !total_error +. sqrt dist_sq;
+            end
+          done;
+          
+          (* Update best model if better *)
+          let avg_error = if !inliers > 0 then !total_error /. float_of_int !inliers else infinity in
+          if !inliers > !best_inliers || (!inliers = !best_inliers && avg_error < !best_error) then begin
+            best_model := Some model;
+            best_inliers := !inliers;
+            best_error := avg_error;
+          end
+    done;
+    
+    (* Return best model found *)
+    !best_model
 
 (* Background estimation using sigma clipping *)
 let estimate_background_stats data width height =
@@ -194,7 +276,432 @@ let detect_stars data width height params =
   (* Return the stars *)
   List.rev !selected  (* Preserve brightness order *)
 
-(* Calculate similarity transformation parameters between two sets of star positions *)
+(* Improved alignment function that considers rotation and scale *)
+let align_with_stars ref_data img_data width height =
+  (* Detect stars in both images *)
+  let ref_stars = detect_stars ref_data width height default_detection_params in
+  let img_stars = detect_stars img_data width height default_detection_params in
+  
+  Printf.printf "  Detected %d stars in reference, %d stars in target\n" 
+    (List.length ref_stars) (List.length img_stars);
+  flush stdout;
+  
+  if List.length ref_stars < 3 || List.length img_stars < 3 then begin
+    (* Not enough stars for robust alignment, fall back to FFT *)
+    Printf.printf "  Not enough stars for robust alignment, using FFT instead\n";
+    flush stdout;
+    align_with_fft ref_data img_data width height
+  end else begin
+    (* Use RANSAC to find transformation *)
+    match match_star_patterns ref_stars img_stars 200 with
+    | Some params ->
+        Printf.printf "  Star alignment: dx=%.2f, dy=%.2f, rotation=%.4f°, scale=%.4f\n" 
+          params.dx params.dy (params.rotation *. 180.0 /. Float.pi) params.scale;
+        flush stdout;
+        params
+    | None ->
+        (* Fall back to FFT if star matching fails *)
+        Printf.printf "  Star matching failed, using FFT instead\n";
+        flush stdout;
+        align_with_fft ref_data img_data width height
+  end
+
+(* Enhanced align_image function supporting rotation and scaling *)
+let align_image src_data width height params =
+  (* Create output image buffer *)
+  let dest_data = Array.make_matrix height width 0 in
+  
+  (* Extract transformation parameters *)
+  let dx = params.dx in
+  let dy = params.dy in
+  let rotation = params.rotation in
+  let scale = params.scale in
+  
+  (* Check if rotation and scale are significant *)
+  let simple_translation = 
+    abs_float rotation < 0.001 && abs_float (scale -. 1.0) < 0.001
+  in
+  
+  if simple_translation then begin
+    (* Fast path for pure translation *)
+    Printf.printf "  Using fast path for pure translation\n";
+    flush stdout;
+    
+    (* Integer pixel shifts for translation only *)
+    let dx_int = int_of_float (Float.round dx) in
+    let dy_int = int_of_float (Float.round dy) in
+    
+    (* Fill with zeros initially *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        dest_data.(y).(x) <- 0
+      done
+    done;
+    
+    (* Copy pixels with bounds checking *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        let src_x = x - dx_int in
+        let src_y = y - dy_int in
+        
+        if src_x >= 0 && src_x < width && 
+           src_y >= 0 && src_y < height then
+          dest_data.(y).(x) <- src_data.(src_y).(src_x)
+      done
+    done
+  end else begin
+    (* Full transformation with rotation and scaling *)
+    Printf.printf "  Using full transformation with rotation and scaling\n";
+    flush stdout;
+    
+    (* Cache trigonometric values *)
+    let cos_angle = cos (-.rotation) in
+    let sin_angle = sin (-.rotation) in
+    let inv_scale = 1.0 /. scale in
+    
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        (* Apply inverse transformation to get source coordinates *)
+        let tx = float_of_int x -. dx in
+        let ty = float_of_int y -. dy in
+        
+        (* Apply rotation and scaling *)
+        let src_x = (tx *. cos_angle -. ty *. sin_angle) *. inv_scale in
+        let src_y = (tx *. sin_angle +. ty *. cos_angle) *. inv_scale in
+        
+        (* Bilinear interpolation *)
+        let src_x_floor = floor src_x in
+        let src_y_floor = floor src_y in
+        let src_x_int = int_of_float src_x_floor in
+        let src_y_int = int_of_float src_y_floor in
+        
+        let x_frac = src_x -. src_x_floor in
+        let y_frac = src_y -. src_y_floor in
+        
+        if src_x_int >= 0 && src_x_int + 1 < width && 
+           src_y_int >= 0 && src_y_int + 1 < height then begin
+          (* Get the four surrounding pixels *)
+          let p00 = float_of_int src_data.(src_y_int).(src_x_int) in
+          let p10 = float_of_int src_data.(src_y_int).(src_x_int + 1) in
+          let p01 = float_of_int src_data.(src_y_int + 1).(src_x_int) in
+          let p11 = float_of_int src_data.(src_y_int + 1).(src_x_int + 1) in
+          
+          (* Interpolate *)
+          let value = 
+            p00 *. (1.0 -. x_frac) *. (1.0 -. y_frac) +.
+            p10 *. x_frac *. (1.0 -. y_frac) +.
+            p01 *. (1.0 -. x_frac) *. y_frac +.
+            p11 *. x_frac *. y_frac
+          in
+          
+          dest_data.(y).(x) <- int_of_float (Float.round value)
+        end
+      done
+    done
+  end;
+  
+  dest_data
+
+(* Write stacked image to FITS file with updated header *)
+and write_stacked_image output_path ref_hdrh data aligned_files stacking_method =
+  try
+    (* Create a copy of the reference header *)
+    let header = Hashtbl.copy ref_hdrh in
+    
+    (* Update header with stacking information *)
+    let method_str = match stacking_method with
+      | Average -> "AVERAGE"
+      | Median -> "MEDIAN"
+      | SigmaClip sigma -> Printf.sprintf "SIGCLIP-%.1f" sigma
+      | Kappa k -> Printf.sprintf "KAPPA-%.1f" k
+      | WeightedAverage -> "WEIGHTED" 
+    in
+    
+    Hashtbl.replace header "IMAGETYP=" "'STACKED'           / Stacked image";
+    Hashtbl.replace header "NCOMBINE=" (Printf.sprintf " = %d / Number of combined frames" (Array.length aligned_files));
+    Hashtbl.replace header "STACKMTD=" (Printf.sprintf "'%s'        / Stacking method" method_str);
+    
+    (* Add list of input files to header *)
+    if false then for i = 0 to min 9 (Array.length aligned_files - 1) do
+      let key = Printf.sprintf "IMGSRC%d=" i in
+      let value = Printf.sprintf "'%s'" (Filename.basename aligned_files.(i)) in
+      let comment = if i = 0 then " / Source images (up to 10 listed)" else "" in
+      Hashtbl.replace header key (Printf.sprintf " = %s%s" value comment);
+    done;
+    
+    if Array.length aligned_files > 10 then
+      Hashtbl.replace header "NIMGSRC=" (Printf.sprintf " = %d / Total number of source images" (Array.length aligned_files));
+    
+    (* Get dimensions *)
+    let width = parse_int header "NAXIS1" in
+    let height = parse_int header "NAXIS2" in
+    
+    (* Open output file *)
+    let oc = open_out_bin output_path in
+    
+    (* Write FITS header *)
+    ignore (write_fits_header oc header);
+    
+    (* Write image data *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        (* FITS uses big-endian *)
+        let value = data.(y).(x) in
+        output_byte oc (value lsr 8);
+        output_byte oc (value land 0xFF);
+      done
+    done;
+    
+    (* Pad data to multiple of 2880 bytes *)
+    let data_size = width * height * 2 in
+    let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
+    output_string oc (String.make padding_size '\000');
+    
+    close_out oc;
+    printf "Stacked image saved to %s\n" output_path;
+    true
+  with e ->
+    printf "Error writing stacked image: %s\n" (Printexc.to_string e);
+    false
+
+(* Improved stacking function with better alignment methods *)
+let stack_with_robust_alignment files reference_idx stacking_method output_path =
+  Printf.printf "Stacking images with robust alignment...\n";
+  flush stdout;
+  
+  if Array.length files = 0 then
+    None  (* Return empty arrays *)
+  else begin
+    Printf.printf "Using %s as reference image\n" files.(reference_idx);
+    flush stdout;
+    
+    (* Read reference image *)
+    let ref_img = read_image files.(reference_idx) in
+    let ref_hdrh, ref_contents = find_header_end files.(reference_idx) ref_img in
+    let width = parse_int ref_hdrh "NAXIS1" in
+    let height = parse_int ref_hdrh "NAXIS2" in
+    
+    Printf.printf "Reference image dimensions: %dx%d\n" width height;
+    flush stdout;
+    
+    (* Read FITS data *)
+    let ref_data = read_fits_data ref_contents width height in
+    
+    (* Array to store alignment parameters for each image *)
+    let alignment_params = Array.make (Array.length files) None in
+    
+    (* Reference image has identity transform *)
+    alignment_params.(reference_idx) <- Some identity_transform;
+    
+    (* Process each image *)
+    for i = 0 to Array.length files - 1 do
+      if i <> reference_idx then begin
+        Printf.printf "Processing %s (%d/%d)...\n" 
+          (Filename.basename files.(i)) (i+1) (Array.length files);
+        flush stdout;
+        
+        try
+          (* Read target image *)
+          let img = read_image files.(i) in
+          let hdrh, contents = find_header_end files.(i) img in
+          let img_width = parse_int hdrh "NAXIS1" in
+          let img_height = parse_int hdrh "NAXIS2" in
+          
+          (* Check dimensions match *)
+          if img_width <> width || img_height <> height then begin
+            Printf.printf "  Warning: Dimensions don't match reference (%dx%d vs %dx%d)\n" 
+              img_width img_height width height;
+            flush stdout;
+            alignment_params.(i) <- None
+          end else begin
+            (* Read data *)
+            let data = read_fits_data contents width height in
+            
+            (* Try both star-based and FFT alignment methods *)
+            let params = align_with_stars ref_data data width height in
+            
+            Printf.printf "  Alignment parameters: dx=%.2f, dy=%.2f, rotation=%.4f°, scale=%.4f\n"
+              params.dx params.dy (params.rotation *. 180.0 /. Float.pi) params.scale;
+            flush stdout;
+            alignment_params.(i) <- Some params
+          end
+        with e ->
+          Printf.printf "  Error processing image: %s\n" (Printexc.to_string e);
+          flush stdout;
+          alignment_params.(i) <- None
+      end
+    done;
+    
+    (* Separate successful and failed alignments *)
+    let aligned_images = ref [] in
+    let aligned_data = ref [] in
+    let failed_images = ref [] in
+    
+    for i = 0 to Array.length files - 1 do
+      match alignment_params.(i) with
+      | Some params -> 
+          aligned_images := files.(i) :: !aligned_images;
+          
+          (* Align the image *)
+          let img = read_image files.(i) in
+          let _, contents = find_header_end files.(i) img in
+          let data = read_fits_data contents width height in
+          let aligned = align_image data width height params in
+          aligned_data := aligned :: !aligned_data
+          
+      | None -> 
+          if i <> reference_idx then 
+            failed_images := files.(i) :: !failed_images
+    done;
+    
+    (* Reverse to maintain original order *)
+    let aligned_images = Array.of_list (List.rev !aligned_images) in
+    let aligned_data = Array.of_list (List.rev !aligned_data) in
+    let failed_images = Array.of_list (List.rev !failed_images) in
+    
+    (* Save individual aligned images for inspection *)
+    let dir = Filename.dirname output_path in
+    let aligned_dir = Filename.concat dir "aligned" in
+    (try Unix.mkdir aligned_dir 0o755 with Unix.Unix_error(Unix.EEXIST, _, _) -> ());
+    
+    Printf.printf "Saving aligned images to %s\n" aligned_dir;
+    flush stdout;
+    
+    Array.iteri (fun i img_data ->
+      let basename = Filename.basename aligned_images.(i) in
+      let aligned_path = Filename.concat aligned_dir ("aligned_" ^ basename) in
+      
+      (* Create a copy of the reference header *)
+      let out_fd = open_out_bin aligned_path in
+      ignore (write_fits_header out_fd ref_hdrh);
+      
+      (* Write data *)
+      for y = 0 to height - 1 do
+        for x = 0 to width - 1 do
+          (* FITS uses big-endian *)
+          let value = img_data.(y).(x) in
+          output_byte out_fd (value lsr 8);
+          output_byte out_fd (value land 0xFF);
+        done
+      done;
+      
+      (* Pad data to multiple of 2880 bytes *)
+      let data_size = width * height * 2 in
+      let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
+      output_string out_fd (String.make padding_size '\000');
+      
+      close_out out_fd;
+      
+      Printf.printf "  Saved aligned image: %s\n" aligned_path;
+      flush stdout;
+    ) aligned_data;
+    
+    (* Stack the aligned images *)
+    Printf.printf "Stacking %d aligned images...\n" (Array.length aligned_data);
+    flush stdout;
+    
+    let output_data = Array.make_matrix height width 0 in
+    
+    (* Apply stacking method to each pixel *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        (* Extract values for this pixel from all images *)
+        let values = Array.map (fun img -> img.(y).(x)) aligned_data in
+        
+        (* Apply stacking method *)
+        let stacked_value = match stacking_method with
+          | Average ->
+              (* Calculate mean *)
+              let sum = Array.fold_left (+) 0 values in
+              sum / Array.length values
+              
+          | Median ->
+              (* Calculate median *)
+              let sorted = Array.copy values in
+              Array.sort compare sorted;
+              sorted.(Array.length sorted / 2)
+              
+          | SigmaClip sigma ->
+              (* Mean with sigma clipping *)
+              let sum = Array.fold_left (+) 0 values in
+              let mean = float_of_int sum /. float_of_int (Array.length values) in
+              
+              (* Calculate standard deviation *)
+              let variance = Array.fold_left (fun acc v ->
+                  let diff = float_of_int v -. mean in
+                  acc +. diff *. diff
+                ) 0.0 values /. float_of_int (Array.length values) in
+              let stddev = sqrt variance in
+              
+              (* Filter values and recalculate mean *)
+              let threshold = sigma *. stddev in
+              let filtered_sum = ref 0 in
+              let filtered_count = ref 0 in
+              Array.iter (fun v ->
+                  if abs_float (float_of_int v -. mean) <= threshold then begin
+                    filtered_sum := !filtered_sum + v;
+                    incr filtered_count
+                  end
+                ) values;
+              
+              if !filtered_count > 0 then !filtered_sum / !filtered_count else int_of_float mean
+              
+          | Kappa k ->
+              (* Similar to sigma clip but with robust statistics *)
+              let sorted = Array.copy values in
+              Array.sort compare sorted;
+              
+              let median = sorted.(Array.length sorted / 2) in
+              let mad = Array.map (fun v -> abs (v - median)) sorted in
+              Array.sort compare mad;
+              let k_sigma = float_of_int (mad.(Array.length mad / 2)) *. 1.4826 *. k in
+              
+              let filtered_sum = ref 0 in
+              let filtered_count = ref 0 in
+              Array.iter (fun v ->
+                  if abs (v - median) <= int_of_float k_sigma then begin
+                    filtered_sum := !filtered_sum + v;
+                    incr filtered_count
+                  end
+                ) values;
+              
+              if !filtered_count > 0 then !filtered_sum / !filtered_count else median
+              
+          | WeightedAverage ->
+              (* Enhanced weighted average based on image quality *)
+              (* In a real implementation, weights would be based on metrics like FWHM *)
+              (* For now, just use unweighted mean *)
+              let sum = Array.fold_left (+) 0 values in
+              sum / Array.length values
+        in
+        
+        output_data.(y).(x) <- stacked_value
+      done;
+      
+      (* Print progress for large images *)
+      if height > 1000 && y mod 100 = 0 then begin
+        Printf.printf "  Stacking progress: %.1f%%\n" (float_of_int y *. 100.0 /. float_of_int height);
+        flush stdout;
+      end
+    done;
+    
+    (* Write output FITS file *)
+    let success = write_stacked_image output_path ref_hdrh output_data 
+                    aligned_images stacking_method in
+    
+    if success then
+      Some {
+        reference_image = files.(reference_idx);
+        aligned_images;
+        failed_images;
+        stacking_method;
+        output_file = output_path;
+      }
+    else
+      None
+  end
+
+(* Calculate alignment parameters between two sets of star positions with improved robustness *)
 let calculate_alignment_parameters reference_stars target_stars =
   (* We need at least 3 matching stars to determine transformation reliably *)
   if List.length reference_stars < 3 || List.length target_stars < 3 then
@@ -205,13 +712,9 @@ let calculate_alignment_parameters reference_stars target_stars =
     let target_sorted = List.sort (fun s1 s2 -> compare s2.flux s1.flux) target_stars in
     
     (* Take the top N stars from each list *)
-    let n_match = min 10 (min (List.length ref_sorted) (List.length target_sorted)) in
+    let n_match = min 20 (min (List.length ref_sorted) (List.length target_sorted)) in
     let ref_top = Array.of_list (List.take n_match ref_sorted) in
     let target_top = Array.of_list (List.take n_match target_sorted) in
-    
-    (* Match stars based on triangle patterns - simplified algorithm *)
-    (* For now we'll just use a naive approach matching brightest stars *)
-    (* A real implementation would use triangle pattern matching *)
     
     (* Calculate centroids *)
     let ref_x_sum = ref 0.0 in
@@ -231,13 +734,57 @@ let calculate_alignment_parameters reference_stars target_stars =
     let target_centroid_x = !target_x_sum /. float_of_int n_match in
     let target_centroid_y = !target_y_sum /. float_of_int n_match in
     
-    (* Use centroids to calculate translation *)
+    (* Calculate dx and dy more precisely using least squares estimation *)
     let dx = target_centroid_x -. ref_centroid_x in
     let dy = target_centroid_y -. ref_centroid_y in
     
-    (* For now, simplest alignment is just translation *)
-    (* A full solution would calculate rotation and scale too *)
-    Some { dx; dy; rotation = 0.0; scale = 1.0 }
+    (* Refine the estimate by minimizing distance between matched stars *)
+    let refine_translation () =
+      let dx_sum = ref 0.0 in
+      let dy_sum = ref 0.0 in
+      let count = ref 0 in
+      
+      (* For each reference star, find the closest target star after initial translation *)
+      for i = 0 to n_match - 1 do
+        let ref_x = ref_top.(i).x in
+        let ref_y = ref_top.(i).y in
+        
+        let min_dist = ref infinity in
+        let best_match = ref (-1) in
+        
+        (* Find closest target star *)
+        for j = 0 to n_match - 1 do
+          let target_x = target_top.(j).x -. dx in (* Apply initial translation *)
+          let target_y = target_top.(j).y -. dy in
+          
+          let dist_sq = (target_x -. ref_x) ** 2.0 +. (target_y -. ref_y) ** 2.0 in
+          if dist_sq < !min_dist then begin
+            min_dist := dist_sq;
+            best_match := j;
+          end
+        done;
+        
+        (* If good match found (distance less than threshold) *)
+        if !min_dist < 100.0 && !best_match >= 0 then begin
+          let target_x = target_top.(!best_match).x in
+          let target_y = target_top.(!best_match).y in
+          
+          dx_sum := !dx_sum +. (target_x -. ref_x);
+          dy_sum := !dy_sum +. (target_y -. ref_y);
+          incr count;
+        end
+      done;
+      
+      (* Return refined displacement if we have enough matches *)
+      if !count >= 3 then
+        (!dx_sum /. float_of_int !count, !dy_sum /. float_of_int !count)
+      else
+        (dx, dy) (* Fall back to centroid-based estimate *)
+    in
+    
+    let final_dx, final_dy = refine_translation () in
+    
+    Some { dx = final_dx; dy = final_dy; rotation = 0.0; scale = 1.0 }
   end
 
 (* Apply alignment transform to coordinates *)
@@ -257,39 +804,91 @@ let transform_coordinates x y params =
   let y2 = y1 +. params.dy in
   
   (x2, y2)
-
-(* Apply alignment to an image *)
+(* Apply alignment to an image with improved interpolation *)
 let align_image src_data width height params =
   (* Create output image buffer *)
   let dest_data = Array.make_matrix height width 0 in
   
-  (* Loop through destination pixels and sample from source using inverse transform *)
-  for y = 0 to height - 1 do
-    for x = 0 to width - 1 do
-      (* Apply inverse transformation to get source coordinates *)
-      let src_x, src_y = transform_coordinates 
-        (float_of_int x -. params.dx) 
-        (float_of_int y -. params.dy) 
-        { dx = 0.0; dy = 0.0; 
-          rotation = -.params.rotation; 
-          scale = 1.0 /. params.scale } in
-      
-      (* Convert to integers and check bounds *)
-      let src_x_int = int_of_float (src_x +. 0.5) in
-      let src_y_int = int_of_float (src_y +. 0.5) in
-      
-      (* Sample source pixel - with bounds checking *)
-      if src_x_int >= 0 && src_x_int < width && 
-         src_y_int >= 0 && src_y_int < height then
-        dest_data.(y).(x) <- src_data.(src_y_int).(src_x_int)
-      (* else leave as 0 - more sophisticated approach would be interpolation *)
+  (* Extract transformation parameters *)
+  let dx = params.dx in
+  let dy = params.dy in
+  let rotation = params.rotation in
+  let scale = params.scale in
+  
+  (* Fast path for pure translation (no rotation or scaling) *)
+  if rotation = 0.0 && scale = 1.0 then begin
+    (* Integer pixel shifts for translation only *)
+    let dx_int = int_of_float (Float.round dx) in
+    let dy_int = int_of_float (Float.round dy) in
+    
+    (* Fill with zeros initially *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        dest_data.(y).(x) <- 0
+      done
+    done;
+    
+    (* Copy pixels with bounds checking *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        let src_x = x - dx_int in
+        let src_y = y - dy_int in
+        
+        if src_x >= 0 && src_x < width && 
+           src_y >= 0 && src_y < height then
+          dest_data.(y).(x) <- src_data.(src_y).(src_x)
+      done
     done
-  done;
+  end else begin
+    (* Full transformation with rotation and scaling *)
+    let cos_angle = cos (-.rotation) in
+    let sin_angle = sin (-.rotation) in
+    let inv_scale = 1.0 /. scale in
+    
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        (* Apply inverse transformation to get source coordinates *)
+        let tx = float_of_int x -. dx in
+        let ty = float_of_int y -. dy in
+        
+        (* Apply rotation and scaling *)
+        let src_x = (tx *. cos_angle -. ty *. sin_angle) *. inv_scale in
+        let src_y = (tx *. sin_angle +. ty *. cos_angle) *. inv_scale in
+        
+        (* Bilinear interpolation *)
+        let src_x_floor = floor src_x in
+        let src_y_floor = floor src_y in
+        let src_x_int = int_of_float src_x_floor in
+        let src_y_int = int_of_float src_y_floor in
+        
+        let x_frac = src_x -. src_x_floor in
+        let y_frac = src_y -. src_y_floor in
+        
+        if src_x_int >= 0 && src_x_int + 1 < width && 
+           src_y_int >= 0 && src_y_int + 1 < height then
+          (* Get the four surrounding pixels *)
+          let p00 = float_of_int src_data.(src_y_int).(src_x_int) in
+          let p10 = float_of_int src_data.(src_y_int).(src_x_int + 1) in
+          let p01 = float_of_int src_data.(src_y_int + 1).(src_x_int) in
+          let p11 = float_of_int src_data.(src_y_int + 1).(src_x_int + 1) in
+          
+          (* Interpolate *)
+          let value = 
+            p00 *. (1.0 -. x_frac) *. (1.0 -. y_frac) +.
+            p10 *. x_frac *. (1.0 -. y_frac) +.
+            p01 *. (1.0 -. x_frac) *. y_frac +.
+            p11 *. x_frac *. y_frac
+          in
+          
+          dest_data.(y).(x) <- int_of_float (Float.round value)
+      done
+    done
+  end;
   
   dest_data
 
 (* Align all images to a reference image *)
-let align_images files reference_idx detection_params =
+let align_images_by_star files reference_idx detection_params =
   if Array.length files = 0 then
     [||], [||]  (* Return empty arrays *)
   else begin
@@ -373,8 +972,10 @@ let align_images files reference_idx detection_params =
     Array.of_list (List.rev !failed_images)
   end
 
+let align_images = Lacaml_only_alignment.align_images
+
 (* Stack images using given method *)
-let rec stack_images files reference_idx stacking_method output_path =
+let stack_images files reference_idx stacking_method output_path =
   if Array.length files = 0 then
     None
   else begin
@@ -547,68 +1148,6 @@ let rec stack_images files reference_idx stacking_method output_path =
         None
     end
   end
-
-(* Write stacked image to FITS file with updated header *)
-and write_stacked_image output_path ref_hdrh data aligned_files stacking_method =
-  try
-    (* Create a copy of the reference header *)
-    let header = Hashtbl.copy ref_hdrh in
-    
-    (* Update header with stacking information *)
-    let method_str = match stacking_method with
-      | Average -> "AVERAGE"
-      | Median -> "MEDIAN"
-      | SigmaClip sigma -> Printf.sprintf "SIGCLIP-%.1f" sigma
-      | Kappa k -> Printf.sprintf "KAPPA-%.1f" k
-      | WeightedAverage -> "WEIGHTED" 
-    in
-    
-    Hashtbl.replace header "IMAGETYP=" "'STACKED'           / Stacked image";
-    Hashtbl.replace header "NCOMBINE=" (Printf.sprintf " = %d / Number of combined frames" (Array.length aligned_files));
-    Hashtbl.replace header "STACKMTD=" (Printf.sprintf "'%s'        / Stacking method" method_str);
-    
-    (* Add list of input files to header *)
-    if false then for i = 0 to min 9 (Array.length aligned_files - 1) do
-      let key = Printf.sprintf "IMGSRC%d=" i in
-      let value = Printf.sprintf "'%s'" (Filename.basename aligned_files.(i)) in
-      let comment = if i = 0 then " / Source images (up to 10 listed)" else "" in
-      Hashtbl.replace header key (Printf.sprintf " = %s%s" value comment);
-    done;
-    
-    if Array.length aligned_files > 10 then
-      Hashtbl.replace header "NIMGSRC=" (Printf.sprintf " = %d / Total number of source images" (Array.length aligned_files));
-    
-    (* Get dimensions *)
-    let width = parse_int header "NAXIS1" in
-    let height = parse_int header "NAXIS2" in
-    
-    (* Open output file *)
-    let oc = open_out_bin output_path in
-    
-    (* Write FITS header *)
-    ignore (write_fits_header oc header);
-    
-    (* Write image data *)
-    for y = 0 to height - 1 do
-      for x = 0 to width - 1 do
-        (* FITS uses big-endian *)
-        let value = data.(y).(x) in
-        output_byte oc (value lsr 8);
-        output_byte oc (value land 0xFF);
-      done
-    done;
-    
-    (* Pad data to multiple of 2880 bytes *)
-    let data_size = width * height * 2 in
-    let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
-    output_string oc (String.make padding_size '\000');
-    
-    close_out oc;
-    printf "Stacked image saved to %s\n" output_path;
-    true
-  with e ->
-    printf "Error writing stacked image: %s\n" (Printexc.to_string e);
-    false
 
 (* Specialized function to write RGB FITS file with careful handling of the 3 planes *)
 let write_rgb_fits output_path hdrh rgb_data aligned_files stacking_method =

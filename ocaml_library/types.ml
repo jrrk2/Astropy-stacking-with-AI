@@ -101,6 +101,44 @@ dec_deg: float;
 mag_v: float option;
 }
 
+(* Types for star detection and alignment *)
+type star_point = {
+  x: float;          (* X coordinate in pixels *)
+  y: float;          (* Y coordinate in pixels *)
+  flux: float;       (* Integrated flux (brightness) *)
+  fwhm: float;       (* Full-width half-maximum (star size) *)
+}
+
+type alignment_parameters = {
+  dx: float;         (* X translation *)
+  dy: float;         (* Y translation *)
+  rotation: float;   (* Rotation angle in radians *)
+  scale: float;      (* Scale factor *)
+}
+
+type stacking_method = 
+  | Average           (* Simple mean stacking *)
+  | Median            (* Median stacking - good for cosmic ray rejection *)
+  | SigmaClip of float (* Sigma-clipped mean with given sigma threshold *)
+  | Kappa of float    (* Kappa-sigma clipping with rejection threshold *)
+  | WeightedAverage   (* Weighted by image quality *)
+
+(* Star detection parameters *)
+type detection_params = {
+  threshold: float;   (* Detection threshold in sigma above background *)
+  min_separation: int; (* Minimum separation between stars in pixels *)
+  max_stars: int;     (* Maximum number of stars to use for alignment *)
+}
+
+(* Result of the stacking operation *)
+type stacking_result = {
+  reference_image: string;         (* Filename of reference image *)
+  aligned_images: string array;    (* Filenames of successfully aligned images *)
+  failed_images: string array;     (* Filenames of images that failed to align *)
+  stacking_method: stacking_method; (* Method used for stacking *)
+  output_file: string;            (* Path to output stacked image *)
+}
+
 (* Implementation of List.take function *)
 module List = struct
   include List  (* Include all the standard List module functions *)
@@ -112,6 +150,14 @@ module List = struct
       | [] -> []
       | hd :: tl -> hd :: take (n-1) tl
 end
+
+(* Create identity transformation parameters (no change) *)
+let identity_transform = {
+  dx = 0.0;
+  dy = 0.0;
+  rotation = 0.0;
+  scale = 1.0;
+}
 
 (* Helper for pattern matching on tuples *)
 let fst3 (a, _, _) = a

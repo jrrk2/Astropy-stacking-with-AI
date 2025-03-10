@@ -7,4 +7,5 @@ radec_quat
 _build/
 norm/
 calibrated/
+tempdir/
 archive.shar.txt

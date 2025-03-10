@@ -1,6 +1,7 @@
 (* stack_cli.ml - Command line interface for image stacking *)
 
 open Printf
+open Types
 open Image_alignment
 
 (* Main CLI function *)

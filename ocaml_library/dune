@@ -41,13 +41,23 @@
 
 (executable
   (name stack_cli)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
-  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis debayer_integration image_alignment stack_cli))
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime lacaml fftw3 types astro_utils)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis debayer_integration image_alignment fft_alignment lacaml_only_alignment stack_cli))
 
 (executable
   (name stack_calibrated)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime lacaml fftw3 types astro_utils)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis debayer_integration image_alignment fft_alignment lacaml_only_alignment stack_calibrated))
+
+(executable
+  (name align_check_cli)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
-  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis debayer_integration image_alignment stack_calibrated))
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis alignment_checker align_check_cli))
+
+(executable
+  (name astrometric_stack_cli)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis astrometric_alignment astrometric_stack_cli))
 
 (library
   (name types)
