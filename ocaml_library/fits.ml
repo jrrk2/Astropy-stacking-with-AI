@@ -91,6 +91,24 @@ let read_fits_data contents width height =
     done;
     data
 
+(* Read 32-bit floating point FITS data *)
+let read_fits_float_data contents width height =
+  let data = Array.make_matrix height width 0.0 in
+  for y = 0 to height - 1 do
+    for x = 0 to width - 1 do
+      let offset = (y * width + x) * 4 in
+      let byte0 = int_of_char contents.[offset] in
+      let byte1 = int_of_char contents.[offset + 1] in
+      let byte2 = int_of_char contents.[offset + 2] in
+      let byte3 = int_of_char contents.[offset + 3] in
+      
+      let int_bits = (byte0 lsl 24) lor (byte1 lsl 16) lor (byte2 lsl 8) lor byte3 in
+      let float_val = Int32.float_of_bits (Int32.of_int int_bits) in
+      data.(y).(x) <- float_val
+    done
+  done;
+data
+
 (* Write RGB data as FITS *)
 let write_rgb_fits filename data wcs exposure = let open Printf in
     let oc = open_out_bin filename in

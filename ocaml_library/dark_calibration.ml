@@ -7,6 +7,7 @@ open Dark_temp_analysis
 
 type calibration_options = {
   dark_dir: string;
+  light_dir: string;    (* New field for input directory *)
   output_dir: string;
   temp_tolerance: float;
   force_rebuild: bool;
@@ -97,6 +98,134 @@ let group_dark_frames dark_files master_dir =
   
   Array.of_list groups
 
+(* Create master dark in memory and use it directly *)
+let create_and_use_master_dark group =
+  printf "Creating master dark for temperature bin %d (%.1f°C) from %d files...\n" 
+    group.temp_bin group.temperature (Array.length group.files);
+  
+  if Array.length group.files = 0 then
+    failwith "No dark frames to average";
+  
+  (* Read the first dark to get dimensions *)
+  let first_dark = group.files.(0) in
+  let img = read_image first_dark in
+  let hdrh, contents = find_header_end first_dark img in
+  let width = parse_int hdrh "NAXIS1" in
+  let height = parse_int hdrh "NAXIS2" in
+  
+  printf "  Dark frame dimensions: %dx%d\n" width height;
+  
+  (* Initialize accumulation array using floating point *)
+  let master_dark = Array.make_matrix height width 0.0 in
+  
+  (* Process each dark frame *)
+  Array.iter (fun file ->
+    printf "  Reading %s\n" (Filename.basename file);
+    
+    try
+      let img = read_image file in
+      let _, contents = find_header_end file img in
+      let data = read_fits_data contents width height in
+      
+      (* Add to accumulation, converting to float *)
+      for y = 0 to height - 1 do
+        for x = 0 to width - 1 do
+          master_dark.(y).(x) <- master_dark.(y).(x) +. float_of_int data.(y).(x)
+        done
+      done
+    with e ->
+      printf "  Error reading %s: %s\n" file (Printexc.to_string e)
+  ) group.files;
+  
+  (* Calculate average *)
+  let count = float_of_int (Array.length group.files) in
+  
+  (* For each pixel, divide by count to get average *)
+  for y = 0 to height - 1 do
+    for x = 0 to width - 1 do
+      master_dark.(y).(x) <- master_dark.(y).(x) /. count
+    done
+  done;
+  
+  printf "  Master dark created in memory\n";
+  master_dark
+
+(* Apply dark frame calibration to an image using in-memory master dark *)
+let calibrate_image_in_memory image_path master_dark output_path =
+  printf "Calibrating %s using in-memory master dark\n" 
+    (Filename.basename image_path);
+  
+  (* Read the image *)
+  let img = read_image image_path in
+  let hdrh, contents = find_header_end image_path img in
+  let width = parse_int hdrh "NAXIS1" in
+  let height = parse_int hdrh "NAXIS2" in
+  let image_data = read_fits_data contents width height in
+  
+  (* Check dimensions match *)
+  if width <> Array.length master_dark.(0) || height <> Array.length master_dark then
+    failwith (sprintf "Image dimensions (%dx%d) don't match dark frame (%dx%d)"
+                width height (Array.length master_dark.(0)) (Array.length master_dark));
+  
+  (* Create calibrated data *)
+  let cal_data = Array.make_matrix height width 0 in
+  
+  for y = 0 to height - 1 do
+    for x = 0 to width - 1 do
+      (* Subtract dark value, ensuring we don't go below zero *)
+      let cal_value = max 0 (image_data.(y).(x) - int_of_float master_dark.(y).(x)) in
+      cal_data.(y).(x) <- cal_value
+    done
+  done;
+  
+  (* Create output directory if needed *)
+  let dir = Filename.dirname output_path in
+  if not (Sys.file_exists dir) then
+    create_dir dir;
+  
+  (* Save as FITS *)
+  let oc = open_out_bin output_path in
+  
+  (* Create a copy of the original header *)
+  let header_lines = ref [] in
+  Hashtbl.iter (fun key value ->
+    if key <> "END" then
+      header_lines := (key ^ value) :: !header_lines
+  ) hdrh;
+  
+  (* Add calibration info *)
+  header_lines := sprintf "%-80s" "IMAGETYP= 'CALIBRATED'         / Calibrated image" :: !header_lines;
+  header_lines := sprintf "%-80s" "DARKSUB = 'MEMORY'             / Dark subtraction applied in memory" :: !header_lines;
+  
+  (* Add END keyword *)
+  header_lines := sprintf "%-80s" "END" :: !header_lines;
+  
+  (* Write header *)
+  let header = String.concat "" (List.rev !header_lines) in
+  output_string oc header;
+  
+  (* Pad header to multiple of 2880 bytes *)
+  let padding = String.make (2880 - (String.length header mod 2880)) ' ' in
+  output_string oc padding;
+  
+  (* Write data *)
+  for y = 0 to height - 1 do
+    for x = 0 to width - 1 do
+      (* FITS uses big-endian *)
+      let value = cal_data.(y).(x) in
+      output_byte oc (value lsr 8);
+      output_byte oc (value land 0xFF);
+    done
+  done;
+  
+  (* Pad data to multiple of 2880 bytes *)
+  let data_size = width * height * 2 in
+  let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
+  output_string oc (String.make padding_size '\000');
+  
+  close_out oc;
+  printf "  Calibrated image saved to %s\n" output_path
+
 (* Create master dark by averaging multiple dark frames *)
 let create_master_dark group output_path =
   printf "Creating master dark for temperature bin %d (%.1f°C) from %d files...\n" 
@@ -114,8 +243,8 @@ let create_master_dark group output_path =
   
   printf "  Dark frame dimensions: %dx%d\n" width height;
   
-  (* Initialize accumulation array *)
-  let accum = Array.make_matrix height width 0 in
+  (* Initialize accumulation array using floating point *)
+  let accum = Array.make_matrix height width 0.0 in
   
   (* Process each dark frame *)
   Array.iter (fun file ->
@@ -126,10 +255,10 @@ let create_master_dark group output_path =
       let _, contents = find_header_end file img in
       let data = read_fits_data contents width height in
       
-      (* Add to accumulation *)
+      (* Add to accumulation, converting to float *)
       for y = 0 to height - 1 do
         for x = 0 to width - 1 do
-          accum.(y).(x) <- accum.(y).(x) + data.(y).(x)
+          accum.(y).(x) <- accum.(y).(x) +. float_of_int data.(y).(x)
         done
       done
     with e ->
@@ -137,12 +266,12 @@ let create_master_dark group output_path =
   ) group.files;
   
   (* Calculate average *)
-  let avg_data = Array.make_matrix height width 0 in
   let count = float_of_int (Array.length group.files) in
   
+  (* For each pixel, divide by count to get average *)
   for y = 0 to height - 1 do
     for x = 0 to width - 1 do
-      avg_data.(y).(x) <- int_of_float (float_of_int accum.(y).(x) /. count)
+      accum.(y).(x) <- accum.(y).(x) /. count
     done
   done;
   
@@ -151,42 +280,58 @@ let create_master_dark group output_path =
   if not (Sys.file_exists dir) then
     create_dir dir;
   
-  (* Save as FITS *)
+  (* Save as FITS with 32-bit floating point *)
   let oc = open_out_bin output_path in
   
-  (* Write FITS header *)
-  let header = sprintf "%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s"
-    "SIMPLE  =                    T / file does conform to FITS standard"
-    "BITPIX  =                   16 / number of bits per data pixel"
-    "NAXIS   =                    2 / number of data axes"
-    (sprintf "NAXIS1  =                 %4d / length of data axis 1" width)
-    (sprintf "NAXIS2  =                 %4d / length of data axis 2" height)
-    "EXTEND  =                    T / FITS dataset may contain extensions"
-    "BZERO   =                32768 / offset data range to that of unsigned short"
-    "BSCALE  =                    1 / default scaling factor"
-    (sprintf "TEMP    =              %f / CCD Temperature in C" group.temperature)
-    (sprintf "TEMP_K  =              %f / CCD Temperature in K" (group.temperature +. 273.15))
-    (sprintf "DARKAVG =                 %4d / Number of frames averaged" (Array.length group.files))
-    "IMAGETYP= 'MASTER DARK'        / Image type"
-    "END" in
+  (* Write FITS header for 32-bit floating point data *)
+  let make_header_record key value comment =
+    let line = sprintf "%s= %s / %s" key value comment in
+    sprintf "%-80s" line
+  in
+
+  let header = 
+    make_header_record "SIMPLE" "                    T" "file does conform to FITS standard" ^
+    make_header_record "BITPIX" "                  -32" "32-bit floating point" ^
+    make_header_record "NAXIS" "                    2" "number of data axes" ^
+    make_header_record "NAXIS1" (sprintf "                 %4d" width) "length of data axis 1" ^
+    make_header_record "NAXIS2" (sprintf "                 %4d" height) "length of data axis 2" ^
+    make_header_record "EXTEND" "                    T" "FITS dataset may contain extensions" ^
+    make_header_record "BZERO" "                  0.0" "no offset" ^
+    make_header_record "BSCALE" "                  1.0" "default scaling factor" ^
+    make_header_record "TEMP" (sprintf "              %.2f" group.temperature) "CCD Temperature in C" ^
+    make_header_record "TEMP_K" (sprintf "              %.2f" (group.temperature +. 273.15)) "CCD Temperature in K" ^
+    make_header_record "DARKAVG" (sprintf "                 %4d" (Array.length group.files)) "Number of frames averaged" ^
+    make_header_record "IMAGETYP" "'MASTER DARK'        " "Image type" ^
+    make_header_record "END" "" ""
+  in
+  
   output_string oc header;
   
   (* Pad header to multiple of 2880 bytes *)
   let padding = String.make (2880 - (String.length header mod 2880)) ' ' in
   output_string oc padding;
   
-  (* Write data *)
+  (* Write 32-bit floating point data *)
+  let buffer = Bytes.create (4 * width) in
   for y = 0 to height - 1 do
     for x = 0 to width - 1 do
-      (* FITS uses big-endian *)
-      let value = avg_data.(y).(x) in
-      output_byte oc (value lsr 8);
-      output_byte oc (value land 0xFF);
-    done
+      (* IEEE 754 floating point, big-endian *)
+      let float_bits = Int32.bits_of_float accum.(y).(x) in
+      let byte0 = Int32.shift_right_logical float_bits 24 |> Int32.to_int |> char_of_int in
+      let byte1 = Int32.shift_right_logical float_bits 16 |> Int32.logand 0xFFl |> Int32.to_int |> char_of_int in
+      let byte2 = Int32.shift_right_logical float_bits 8 |> Int32.logand 0xFFl |> Int32.to_int |> char_of_int in
+      let byte3 = Int32.logand float_bits 0xFFl |> Int32.to_int |> char_of_int in
+      
+      Bytes.set buffer (x * 4) byte0;
+      Bytes.set buffer (x * 4 + 1) byte1;
+      Bytes.set buffer (x * 4 + 2) byte2;
+      Bytes.set buffer (x * 4 + 3) byte3;
+    done;
+    output_bytes oc buffer;
   done;
   
   (* Pad data to multiple of 2880 bytes *)
-  let data_size = width * height * 2 in
+  let data_size = width * height * 4 in
   let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
   output_string oc (String.make padding_size '\000');
   
@@ -302,7 +447,7 @@ let calibrate_image image_path dark_path output_path =
   close_out oc;
   printf "  Calibrated image saved to %s\n" output_path
 
-(* Process a batch of images with dark calibration *)
+(* Process a batch of images with dark calibration using in-memory master darks *)
 let process_with_calibration options =
   let stats = create_empty_stats () in
   
@@ -315,162 +460,148 @@ let process_with_calibration options =
   
   printf "Found %d dark frames\n" (Array.length dark_files);
   
-  (* Make sure master dark directory exists *)
-  if not (Sys.file_exists options.master_dark_dir) then
-    create_dir options.master_dark_dir;
-  
   (* Group dark frames by temperature *)
-  let dark_groups = group_dark_frames dark_files options.master_dark_dir in
+  let groups = Hashtbl.create 10 in
   
-  printf "Grouped into %d temperature bins:\n" (Array.length dark_groups);
-  Array.iter (fun g ->
-    printf "  Temp bin %d (%.1f°C): %d files%s\n" 
-      g.temp_bin g.temperature (Array.length g.files)
-      (match g.master_path with Some _ -> " (master exists)" | None -> "")
-  ) dark_groups;
+  Array.iter (fun filename ->
+    try
+      let hdrh = just_header filename in
+      let temp = get_temperature hdrh in
+      let temp_bin = int_of_float (floor (temp +. 273.15 +. 0.5)) in
+      
+      let bin_files = match Hashtbl.find_opt groups temp_bin with
+        | Some files -> filename :: files
+        | None -> [filename]
+      in
+      Hashtbl.replace groups temp_bin bin_files
+    with _ ->
+      printf "Warning: Could not read temperature from %s\n" filename
+  ) dark_files;
   
-  (* Create master darks if needed *)
-  if not options.apply_only then begin
-    Array.iter (fun group ->
-      if group.master_path = None || options.force_rebuild then begin
-        let master_name = sprintf "master_dark_temp_%d.fits" group.temp_bin in
-        let master_path = Filename.concat options.master_dark_dir master_name in
-        
-        create_master_dark group master_path;
-        stats.masters_created <- stats.masters_created + 1;
-      end
-    ) dark_groups;
-  end;
+  printf "Grouped into %d temperature bins:\n" (Hashtbl.length groups);
+  Hashtbl.iter (fun bin files ->
+    printf "  Temp bin %d: %d files\n" bin (List.length files)
+  ) groups;
   
-  (* Update master paths after potential creation *)
-  Array.iter (fun group ->
-    let master_name = sprintf "master_dark_temp_%d.fits" group.temp_bin in
-    let master_path = Filename.concat options.master_dark_dir master_name in
-    
-    if Sys.file_exists master_path then
-      group.master_path <- Some master_path
-  ) dark_groups;
+  (* Cache for master darks - key is temp_bin, value is the master dark array *)
+  let master_dark_cache = Hashtbl.create (Hashtbl.length groups) in
   
   (* Find light frames to calibrate *)
-  let cal_files = Hashtbl.create 100 in  (* Track what we've already calibrated *)
-  
-  (* Traverse the directory structure to find all light frames *)
-  let rec find_light_files dir =
-    if options.verbose then
-      printf "Scanning directory: %s\n" dir;
-    
-    try
-      let entries = Sys.readdir dir in
-      Array.iter (fun entry ->
-        let path = Filename.concat dir entry in
-        if Sys.is_directory path then
-          find_light_files path
-        else if Filename.check_suffix path ".fits" || Filename.check_suffix path ".fit" then begin
-          (* Check if this is a light frame (not a dark, flat, etc.) *)
-          try
-            let is_light = 
-              (* Quick check - if it has "dark" in the name, skip it *)
-              not (Str.string_match (Str.regexp ".*dark.*") (String.lowercase_ascii (Filename.basename path)) 0)
-            in
-            
-            if is_light then
-              process_light_frame path
-          with _ ->
-            if options.verbose then
-              printf "  Skipping %s (not a valid FITS file)\n" path
-        end
-      ) entries
-    with Sys_error _ ->
-      if options.verbose then
-        printf "  Error reading directory %s\n" dir
-  
-  (* Process a single light frame *)  
-  and process_light_frame path =
-    (* Check if we've already calibrated this file *)
-    if Hashtbl.mem cal_files path then
-      ()
-    else begin
-      Hashtbl.add cal_files path true;
-      
-      (* Determine output path *)
-      let basename = Filename.basename path in
-      let dirname = Filename.basename (Filename.dirname path) in
-      
-      (* Check if this is already in a temp_X directory *)
-      let is_in_temp_dir = 
-        try Scanf.sscanf dirname "temp_%d" (fun _ -> true) with _ -> false 
-      in
-      
-      let rel_path = 
-        if is_in_temp_dir then
-          Filename.concat dirname basename
-        else
-          basename
-      in
-      
-      let output_path = 
-        if Filename.basename basename |> String.lowercase_ascii |> 
-           String.starts_with ~prefix:"cal_" then
-          (* Already calibrated, skip *)
-          ""
-        else
-          Filename.concat options.output_dir
-            (Filename.concat (Filename.dirname rel_path) 
-               ("cal_" ^ (Filename.basename rel_path)))
-      in
-      
-      (* Skip if already exists *)
-      if output_path <> "" && Sys.file_exists output_path then begin
-        if options.verbose then
-          printf "  Skipping %s (already calibrated)\n" basename;
-        stats.images_skipped <- stats.images_skipped + 1
-      end
-      else if output_path = "" then begin
-        if options.verbose then
-          printf "  Skipping %s (already has cal_ prefix)\n" basename;
-        stats.images_skipped <- stats.images_skipped + 1
-      end
-      else begin
-        (* Extract temperature *)
-        try
-          let hdrh = just_header path in
-          let temp = get_temperature hdrh in
-          
-          if options.verbose then
-            printf "  Processing %s (%.1f°C)...\n" basename temp;
-          
-          (* Find closest matching dark frame *)
-          try
-            let dark_path = find_matching_dark dark_groups temp options.temp_tolerance in
-            
-            (* Create output directory *)
-            let out_dir = Filename.dirname output_path in
-            if not (Sys.file_exists out_dir) then
-              create_dir out_dir;
-            
-            (* Calibrate the image *)
-            calibrate_image path dark_path output_path;
-            stats.images_processed <- stats.images_processed + 1
-            
-          with Not_found ->
-            printf "  No matching dark frame within %.1f°C for %s\n" 
-              options.temp_tolerance basename;
-            stats.no_matching_dark <- stats.no_matching_dark + 1
-            
-        with e ->
-          printf "  Error processing %s: %s\n" 
-            basename (Printexc.to_string e)
-        end
-    end
+  let light_files = 
+    if Sys.file_exists options.light_dir && Sys.is_directory options.light_dir then
+      find_fits_files options.light_dir
+    else
+      [||]
   in
   
-  (* Start processing *)
-  find_light_files options.output_dir;
+  if Array.length light_files = 0 then
+    failwith "No light frames found";
+  
+  printf "Found %d light frames to process\n" (Array.length light_files);
+  
+  (* Process each light frame *)
+  Array.iter (fun light_file ->
+    let basename = Filename.basename light_file in
+    
+    (* Skip if already calibrated *)
+    if String.sub basename 0 4 = "cal_" then begin
+      printf "Skipping %s (already calibrated)\n" basename;
+      stats.images_skipped <- stats.images_skipped + 1
+    end else begin
+      try
+        (* Get image temperature *)
+        let hdrh = just_header light_file in
+        let temp = get_temperature hdrh in
+        let temp_bin = int_of_float (floor (temp +. 273.15 +. 0.5)) in
+        
+        printf "Processing %s (%.1f°C, bin %d)...\n" basename temp temp_bin;
+        
+        (* Find master dark - first check cache *)
+        let master_dark = 
+          if Hashtbl.mem master_dark_cache temp_bin then begin
+            printf "  Using cached master dark for bin %d\n" temp_bin;
+            Hashtbl.find master_dark_cache temp_bin
+          end else begin
+            (* Try exact match first *)
+            match Hashtbl.find_opt groups temp_bin with
+            | Some dark_files when List.length dark_files > 0 ->
+                (* Create master dark in memory *)
+                let dark_array = Array.of_list dark_files in
+                let dark_group = {
+                  temp_bin;
+                  temperature = temp;
+                  files = dark_array;
+                  master_path = None;
+                } in
+                
+                let master = create_and_use_master_dark dark_group in
+                Hashtbl.add master_dark_cache temp_bin master;
+                master
+            | _ ->
+                (* Find closest temperature bin *)
+                let closest_bin = ref None in
+                let min_diff = ref options.temp_tolerance in
+                
+                Hashtbl.iter (fun bin files ->
+                  if List.length files > 0 then begin
+                    let bin_temp = float_of_int bin -. 273.15 in
+                    let diff = abs_float (bin_temp -. temp) in
+                    if diff < !min_diff then begin
+                      min_diff := diff;
+                      closest_bin := Some (bin, bin_temp)
+                    end
+                  end
+                ) groups;
+                
+                match !closest_bin with
+                | Some (bin, bin_temp) ->
+                    printf "  Using closest temperature bin %d (%.1f°C, %.1f°C difference)\n"
+                      bin bin_temp !min_diff;
+                    
+                    if Hashtbl.mem master_dark_cache bin then begin
+                      printf "  Using cached master dark for bin %d\n" bin;
+                      Hashtbl.find master_dark_cache bin
+                    end else begin
+                      (* Get dark files *)
+                      let dark_files = Hashtbl.find groups bin in
+                      let dark_array = Array.of_list dark_files in
+                      let dark_group = {
+                        temp_bin = bin;
+                        temperature = bin_temp;
+                        files = dark_array;
+                        master_path = None;
+                      } in
+                      
+                      let master = create_and_use_master_dark dark_group in
+                      Hashtbl.add master_dark_cache bin master;
+                      master
+                    end
+                | None ->
+                    raise Not_found
+          end
+        in
+        
+        (* Create output path *)
+        let output_path = Filename.concat options.output_dir ("cal_" ^ basename) in
+        
+        (* Apply calibration directly with in-memory master *)
+        calibrate_image_in_memory light_file master_dark output_path;
+        stats.images_processed <- stats.images_processed + 1
+        
+      with 
+      | Not_found ->
+          printf "  No matching dark frame within %.1f°C for %s\n" 
+            options.temp_tolerance basename;
+          stats.no_matching_dark <- stats.no_matching_dark + 1
+      | e ->
+          printf "  Error processing %s: %s\n" basename (Printexc.to_string e);
+          stats.no_matching_dark <- stats.no_matching_dark + 1
+    end
+  ) light_files;
   
   (* Print summary *)
   printf "\nCalibration Summary:\n";
   printf "===================\n";
-  printf "Master dark frames created/updated: %d\n" stats.masters_created;
   printf "Light frames processed: %d\n" stats.images_processed;
   printf "Light frames skipped (already calibrated): %d\n" stats.images_skipped;
   printf "Light frames with no matching dark: %d\n" stats.no_matching_dark;
@@ -479,52 +610,3 @@ let process_with_calibration options =
     printf "\nCalibrated images saved to: %s\n" options.output_dir;
   
   (stats.images_processed, stats.no_matching_dark)
-
-(* Entry point for command-line usage *)
-let main () =
-  let dark_dir = ref "" in
-  let output_dir = ref "calibrated" in
-  let temp_tolerance = ref 2.0 in
-  let force_rebuild = ref false in
-  let apply_only = ref false in
-  let master_dark_dir = ref "master_darks" in
-  let verbose = ref false in
-  
-  let args = [
-    ("-dark", Arg.Set_string dark_dir, "Directory containing dark frames");
-    ("-out", Arg.Set_string output_dir, "Output directory for calibrated images");
-    ("-temp-tol", Arg.Set_float temp_tolerance, "Temperature tolerance in °C");
-    ("-force", Arg.Set force_rebuild, "Force rebuild of master darks");
-    ("-apply", Arg.Set apply_only, "Apply calibration only (don't create masters)");
-    ("-master-dir", Arg.Set_string master_dark_dir, "Directory for master dark frames");
-    ("-v", Arg.Set verbose, "Verbose output");
-  ] in
-  
-  let usage = "Usage: dark_calibration -dark <dir> [options]" in
-  
-  Arg.parse args (fun _ -> ()) usage;
-  
-  if !dark_dir = "" then begin
-    printf "Error: Dark frame directory must be specified\n";
-    Arg.usage args usage;
-    exit 1
-  end;
-  
-  let options = {
-    dark_dir = !dark_dir;
-    output_dir = !output_dir;
-    temp_tolerance = !temp_tolerance;
-    force_rebuild = !force_rebuild;
-    apply_only = !apply_only;
-    master_dark_dir = !master_dark_dir;
-    verbose = !verbose;
-  } in
-  
-  ignore (process_with_calibration options)
-
-(* Run if executed directly *)
-let () = 
-  if !Sys.interactive then
-    ()  (* Don't run main in interactive mode *)
-  else
-    main ()

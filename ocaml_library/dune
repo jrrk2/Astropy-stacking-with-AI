@@ -15,6 +15,16 @@
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface simbad query_simbad astro_noise_analysis debayer_integration dark_temp_analysis dark_calibration))
  
 (executable
+  (name dark_temp_analysis_main)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils astro_noise_analysis dark_temp_analysis dark_calibration dark_temp_analysis_main))
+ 
+(executable
+  (name dark_stack)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils astro_noise_analysis dark_temp_analysis dark_calibration dark_stack))
+ 
+(executable
   (name integration_examples)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface debayer_integration dark_temp_analysis dark_calibration astro_noise_analysis simbad query_simbad integration_examples))
