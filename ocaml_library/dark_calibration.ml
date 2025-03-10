@@ -4,6 +4,7 @@ open Types
 open Fits
 open Printf
 open Dark_temp_analysis
+open Debayer_integration
 
 type calibration_options = {
   dark_dir: string;
@@ -240,7 +241,16 @@ let calibrate_image_in_memory image_path (master_dark, dark_hdrh) output_path =
   output_string oc (String.make padding_size '\000');
   
   close_out oc;
-  printf "  Calibrated image saved to %s\n" output_path
+  printf "  Calibrated image saved to %s\n" output_path;
+
+  (* Apply debayering to get RGB image *)
+  let debayer hdrh data = bin_bayer_pattern data width height (get_bayer_pattern hdrh) in
+  let rgb_data = debayer newh cal_data in
+  let output_fits = Filename.remove_extension output_path ^ "_rgb.fits" in
+  if Fits.write_rgb_data_to_fits output_fits newh rgb_data then
+     Printf.printf "Saved debayered RGB to %s\n" output_fits
+  else
+     print_endline "write_rgb_data failed"
 
 (* Create master dark by averaging multiple dark frames *)
 let create_master_dark group output_path =

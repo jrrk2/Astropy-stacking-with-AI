@@ -77,29 +77,6 @@ let parse_wcs hdrh =
         cd2_2 = parse_float hdrh "CD2_2"
     }
 
-(* Helper function to get Bayer pattern from FITS header *)
-let get_bayer_pattern hdrh =
-  match Hashtbl.find_opt hdrh "BAYERPAT=" with
-  | Some pat -> 
-      let pat_str = match String.split_on_char '\'' pat with
-        | _::nxt::_ -> String.trim nxt
-        | _ -> String.trim pat
-      in
-      (match String.uppercase_ascii pat_str with
-      | "RGGB" -> Some `RGGB
-      | "BGGR" -> Some `BGGR
-      | "GRBG" -> Some `GRBG
-      | "GBRG" -> Some `GBRG
-      | _ -> None)
-  | None -> None
-
-(* Helper to describe Bayer pattern for logging *)
-let describe_bayer_pattern = function
-  | `RGGB -> "RGGB"
-  | `BGGR -> "BGGR"
-  | `GRBG -> "GRBG"
-  | `GBRG -> "GBRG"
-
 (* Read raw FITS image data into array *)
 let read_fits_data contents width height =
     let data = Array.make_matrix height width 0 in
@@ -132,6 +109,9 @@ let read_fits_float_data contents width height =
   done;
 data
 
+let required' hdrh =
+  ["SIMPLE";"BITPIX";"NAXIS"] @ (List.init (parse_int hdrh "NAXIS") (fun ix -> "NAXIS"^string_of_int (ix+1)))
+
 (* Write FITS header from a hash table *)
 let write_fits_header out_fd hdrh =
   try
@@ -141,7 +121,7 @@ let write_fits_header out_fd hdrh =
     Bytes.fill header 0 header_size ' ';
 
     let pos = ref 0 in
-    let required = ["SIMPLE";"BITPIX";"NAXIS";"NAXIS1";"NAXIS2"] in
+    let required = required' hdrh in
     
     (* Helper function to add a record to the header *)
     let dumprec key value' =
@@ -218,6 +198,7 @@ let write_rgb_data_to_fits output_path hdrh rgb_data =
     let width = Array.length rgb_data.(0) in
     
     (* Update header with image dimensions *)
+    Hashtbl.replace hdrh "NAXIS" (sprintf " = 3 / Number of data axes");
     Hashtbl.replace hdrh "NAXIS1" (sprintf " = %d / Width in pixels" width);
     Hashtbl.replace hdrh "NAXIS2" (sprintf " = %d / Height in pixels" height);
     Hashtbl.replace hdrh "NAXIS3" (sprintf " = 3 / Number of color planes (RGB)");
@@ -348,7 +329,7 @@ let copy_fits_with_updates source_path target_path updates =
     Bytes.fill new_header 0 (Bytes.length new_header) ' ';
 
     let pos = ref 0 in
-    let required = ["SIMPLE";"BITPIX";"NAXIS";"NAXIS1";"NAXIS2"] in
+    let required = required' hdrh in
     let dumprec key value' =
         Bytes.blit_string key 0 new_header !pos (String.length key);
         Bytes.set new_header (!pos + 8) '=';

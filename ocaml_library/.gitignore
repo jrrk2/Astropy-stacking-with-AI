@@ -5,4 +5,6 @@ model.dat
 pairing.sh
 radec_quat
 _build/
+norm/
+calibrated/
 archive.shar.txt

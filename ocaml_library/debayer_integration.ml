@@ -1,35 +1,27 @@
 (* debayer.ml - Bayer pattern debayering module *)
 
-(* Convert Bayer pattern raw data to RGB *)
-let debayer_pattern_to_string pattern =
-  match pattern with
+(* Helper function to get Bayer pattern from FITS header *)
+let get_bayer_pattern hdrh =
+  match Hashtbl.find_opt hdrh "BAYERPAT=" with
+  | Some pat -> 
+      let pat_str = match String.split_on_char '\'' pat with
+        | _::nxt::_ -> String.trim nxt
+        | _ -> String.trim pat
+      in
+      (match String.uppercase_ascii pat_str with
+      | "RGGB" -> Some `RGGB
+      | "BGGR" -> Some `BGGR
+      | "GRBG" -> Some `GRBG
+      | "GBRG" -> Some `GBRG
+      | _ -> None)
+  | None -> None
+
+(* Helper to describe Bayer pattern for logging *)
+let describe_bayer_pattern = function
   | `RGGB -> "RGGB"
   | `BGGR -> "BGGR"
   | `GRBG -> "GRBG"
   | `GBRG -> "GBRG"
-
-(* Detect Bayer pattern from filename or header *)
-let detect_bayer_pattern filename hdrh =
-  let basename = Filename.basename filename in
-  if String.contains basename 'r' && String.contains basename 'g' then 
-    Some `RGGB
-  else if String.contains basename 'b' && String.contains basename 'g' then 
-    Some `BGGR
-  else
-    (* Try to extract from header *)
-    match Hashtbl.find_opt hdrh "BAYERPAT=" with
-    | Some pat -> 
-        let pat_str = match String.split_on_char '\'' pat with
-          | _::nxt::_ -> String.trim nxt
-          | _ -> String.trim pat
-        in
-        (match String.uppercase_ascii pat_str with
-        | "RGGB" -> Some `RGGB
-        | "BGGR" -> Some `BGGR
-        | "GRBG" -> Some `GRBG
-        | "GBRG" -> Some `GBRG
-        | _ -> None)
-    | None -> None
 
 (* 2x2 binning respecting RGGB Bayer pattern *)
 let bin_2x2_bayer_rggb data width height =
@@ -100,12 +92,12 @@ let bin_2x2_bayer_gbrg data width height =
   binned
 
 (* Apply appropriate binning based on detected Bayer pattern *)
-let bin_bayer_pattern data width height pattern =
-  match pattern with
-  | `RGGB -> bin_2x2_bayer_rggb data width height
-  | `BGGR -> bin_2x2_bayer_bggr data width height
-  | `GRBG -> bin_2x2_bayer_grbg data width height
-  | `GBRG -> bin_2x2_bayer_gbrg data width height
+let bin_bayer_pattern data width height = function
+  | Some `RGGB -> bin_2x2_bayer_rggb data width height
+  | Some `BGGR -> bin_2x2_bayer_bggr data width height
+  | Some `GRBG -> bin_2x2_bayer_grbg data width height
+  | Some `GBRG -> bin_2x2_bayer_gbrg data width height
+  | _ -> failwith "Unknown pattern"
 
 (* Simple binning for monochrome images *)
 let bin_2x2_mono data width height =

@@ -239,12 +239,12 @@ let analyze_image_noise filename threshold =
     printf "Image dimensions: %dx%d\n" width height;
     
     (* Check for Bayer pattern *)
-    let bayer_pattern = Debayer.detect_bayer_pattern filename hdrh in
+    let bayer_pattern = Debayer.get_bayer_pattern hdrh in
     
     (* Log detected pattern *)
     (match bayer_pattern with
     | Some pattern -> 
-        printf "Detected %s Bayer pattern\n" (Debayer.debayer_pattern_to_string pattern)
+        printf "Detected %s Bayer pattern\n" (Debayer.describe_bayer_pattern pattern)
     | None -> 
         printf "No Bayer pattern detected, treating as monochrome\n");
     
@@ -255,8 +255,8 @@ let analyze_image_noise filename threshold =
     let rgb_data = match bayer_pattern with
     | Some pattern ->
         printf "Applying 2x2 binning with %s pattern...\n" 
-          (Debayer.debayer_pattern_to_string pattern);
-        Debayer.bin_bayer_pattern data width height pattern
+          (Debayer.describe_bayer_pattern pattern);
+        Debayer.bin_bayer_pattern data width height (Some pattern)
     | None ->
         (* No Bayer pattern, use simple 2x2 binning for monochrome *)
         if width > 1024 || height > 1024 then begin
@@ -355,13 +355,13 @@ let analyze_directory_noise files threshold =
       let height = parse_int hdrh "NAXIS2" in
       
       (* Detect Bayer pattern *)
-      let bayer_pattern = Debayer.detect_bayer_pattern file hdrh in
+      let bayer_pattern = Debayer.get_bayer_pattern hdrh in
       
       (match bayer_pattern with
       | Some pattern -> 
-          printf "  Detected %s Bayer pattern\n" (Debayer.debayer_pattern_to_string pattern);
+          printf "  Detected %s Bayer pattern\n" (Debayer.describe_bayer_pattern pattern);
           incr bayer_files;
-          bayer_patterns := (Debayer.debayer_pattern_to_string pattern) :: !bayer_patterns
+          bayer_patterns := (Debayer.describe_bayer_pattern pattern) :: !bayer_patterns
       | None -> 
           printf "  No Bayer pattern detected, treating as monochrome\n");
       
@@ -370,7 +370,7 @@ let analyze_directory_noise files threshold =
       (* Process the image data based on Bayer pattern *)
       let rgb_data = match bayer_pattern with
       | Some pattern ->
-          Debayer.bin_bayer_pattern data width height pattern
+          Debayer.bin_bayer_pattern data width height (Some pattern)
       | None ->
           (* No Bayer pattern, use simple 2x2 binning for monochrome if large *)
           if width > 1024 || height > 1024 then
