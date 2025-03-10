@@ -1,5 +1,29 @@
 (* dark_stack.ml *)
 open Dark_calibration
+open Fits
+open Printf
+
+(* Stack the aligned images and save to a FITS file *)
+let stack_and_save aligned_images output_path reference_file =
+  (* Get header from reference file *)
+  let ref_hdrh = just_header reference_file in
+  
+  (* Update header for stacked image *)
+  Hashtbl.replace ref_hdrh "IMAGETYP" " = 'STACKED' / Stacked image";
+  Hashtbl.replace ref_hdrh "NCOMBINE" (sprintf " = %d / Number of combined frames" (Array.length aligned_images));
+
+(* pseudo-code at the moment
+  (* Stack the images *)
+  let stacked = stack_images aligned_images in
+  
+  (* Apply final stretching *)
+  let final = apply_stretching stacked in
+
+  (* Write the result to a FITS file *)
+  write_rgb_data_to_fits output_path ref_hdrh final
+  *)
+
+  ()
 
 let () =
   let dark_dir = ref "" in

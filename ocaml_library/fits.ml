@@ -77,6 +77,29 @@ let parse_wcs hdrh =
         cd2_2 = parse_float hdrh "CD2_2"
     }
 
+(* Helper function to get Bayer pattern from FITS header *)
+let get_bayer_pattern hdrh =
+  match Hashtbl.find_opt hdrh "BAYERPAT=" with
+  | Some pat -> 
+      let pat_str = match String.split_on_char '\'' pat with
+        | _::nxt::_ -> String.trim nxt
+        | _ -> String.trim pat
+      in
+      (match String.uppercase_ascii pat_str with
+      | "RGGB" -> Some `RGGB
+      | "BGGR" -> Some `BGGR
+      | "GRBG" -> Some `GRBG
+      | "GBRG" -> Some `GBRG
+      | _ -> None)
+  | None -> None
+
+(* Helper to describe Bayer pattern for logging *)
+let describe_bayer_pattern = function
+  | `RGGB -> "RGGB"
+  | `BGGR -> "BGGR"
+  | `GRBG -> "GRBG"
+  | `GBRG -> "GBRG"
+
 (* Read raw FITS image data into array *)
 let read_fits_data contents width height =
     let data = Array.make_matrix height width 0 in
@@ -109,71 +132,153 @@ let read_fits_float_data contents width height =
   done;
 data
 
-(* Write RGB data as FITS *)
-let write_rgb_fits filename data wcs exposure = let open Printf in
-    let oc = open_out_bin filename in
-    (* Write FITS header *)
-    let header = sprintf "%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s%-80s"
-        "SIMPLE  =                    T / file does conform to FITS standard"
-        "BITPIX  =                   16 / number of bits per data pixel"
-        "NAXIS   =                    3 / number of data axes"
-        (sprintf "NAXIS1  =                 %4d / length of data axis 1" (Array.length data.(0)))
-        (sprintf "NAXIS2  =                 %4d / length of data axis 2" (Array.length data))
-        "NAXIS3  =                    3 / length of data axis 3 (RGB)"
-        "EXTEND  =                    T / FITS dataset may contain extensions"
-	"BZERO   =                32768 / offset data range to that of unsigned short"
-	"BSCALE  =                    1 / default scaling factor"
-	(sprintf "EXPOSURE=                 %4d / Exposure time in ms" exposure)
-        "CTYPE1  = 'RA---TAN'           / Right ascension, gnomonic projection"
-        "CTYPE2  = 'DEC--TAN'           / Declination, gnomonic projection"
-        (sprintf "CRVAL1  =              %f / Reference right ascension" wcs.ra_2000)
-        (sprintf "CRVAL2  =              %f / Reference declination" wcs.dec_2000)
-        (sprintf "CRPIX1  =                %f / Reference pixel along axis 1" (wcs.crpix1 /. 2.0))  (* Adjust reference pixel for binning *)
-        (sprintf "CRPIX2  =                %f / Reference pixel along axis 2" (wcs.crpix2 /. 2.0))  
-        (sprintf "CD1_1   =          %f / CD matrix element" (wcs.cd1_1 *. 2.0))        (* Adjust pixel scale for binning *)
-        (sprintf "CD1_2   =          %f / CD matrix element" (wcs.cd1_2 *. 2.0))
-        (sprintf "CD2_1   =          %f / CD matrix element" (wcs.cd2_1 *. 2.0))
-        (sprintf "CD2_2   =          %f / CD matrix element" (wcs.cd2_2 *. 2.0))
-        "END" in
-    output_string oc header;
-    (* Pad header to multiple of 2880 bytes *)
-    let padding = String.make (2880 - (String.length header mod 2880)) ' ' in
-    output_string oc padding;
-    (* Write RGB data *)
-    let plane = Array.length data * Array.length data.(0) * 2 in
-    let buf = Bytes.create (plane*3) in
-    let posr = ref 0 in
-    let posg = ref plane in
-    let posb = ref (plane*2) in
-    for y = 0 to Array.length data - 1 do
-        for x = 0 to Array.length data.(0) - 1 do
-            let (r,g,b) = data.(y).(x) in
-            Bytes.set buf (!posr) (char_of_int ( r / 256));
-            incr posr;
-            Bytes.set buf (!posr) (char_of_int ( r mod 256));
-            incr posr;
-            Bytes.set buf (!posg) (char_of_int ( g / 256));
-            incr posr;
-            Bytes.set buf (!posg) (char_of_int ( g mod 256));
-            incr posr;
-            Bytes.set buf (!posb) (char_of_int ( b / 256));
-            incr posr;
-            Bytes.set buf (!posb) (char_of_int ( b mod 256));
-            incr posr;
-        done
-    done;
-    output_bytes oc buf;
-    (* Pad image to multiple of 2880 bytes *)
-    let padding = String.make (2880 - (Bytes.length buf mod 2880)) ' ' in
-    output_string oc padding;
-    close_out oc
+(* Write FITS header from a hash table *)
+let write_fits_header out_fd hdrh =
+  try
+    (* Create a properly formatted header *)
+    let header_size = 2880 in  (* Starting with one block *)
+    let header = Bytes.create header_size in
+    Bytes.fill header 0 header_size ' ';
 
-let just_header filename =    
-        let fd = open_in_bin filename in
-	let hdrh = Hashtbl.create 257 in
-	let () = scan_header hdrh (read_header fd "") 0 in
-	close_in fd;        
-        hdrh
+    let pos = ref 0 in
+    let required = ["SIMPLE";"BITPIX";"NAXIS";"NAXIS1";"NAXIS2"] in
+    
+    (* Helper function to add a record to the header *)
+    let dumprec key value' =
+      (* Check if we need to extend the header *)
+      if !pos + 80 > Bytes.length header then begin
+        let new_size = Bytes.length header + header_size in
+        let new_header = Bytes.create new_size in
+        Bytes.fill new_header 0 new_size ' ';
+        Bytes.blit header 0 new_header 0 (Bytes.length header);
+        Bytes.fill new_header (Bytes.length header) header_size ' ';
+        Bytes.blit header 0 new_header 0 (Bytes.length header);
+      end;
+      
+      (* Write the keyword *)
+      Bytes.blit_string key 0 header !pos (String.length key);
+      Bytes.set header (!pos + 8) '=';
+      
+      (* Write the value and comment *)
+      let value = 
+        try 
+          let eq = String.index value' '=' + 1 in 
+          String.sub value' eq (String.length value' - eq) 
+        with _ -> value' 
+      in
+      let len = min (String.length value) 71 in
+      Bytes.blit_string value 0 header (!pos+9) len;
+      pos := !pos + 80 
+    in
+
+    (* Add required keyword records first in the correct order *)
+    List.iter (fun key ->
+      match Hashtbl.find_opt hdrh key with
+      | Some value -> dumprec key value
+      | None -> 
+          (* If missing a required keyword, add a default *)
+          let default_value = match key with
+            | "SIMPLE" -> " = T / Standard FITS format"
+            | "BITPIX" -> " = 16 / 16-bit integers"
+            | "NAXIS" -> " = 2 / Number of axes"
+            | "NAXIS1" -> " = 0 / Width (need to set)"
+            | "NAXIS2" -> " = 0 / Height (need to set)"
+            | _ -> " = "
+          in
+          dumprec key default_value
+    ) required;
+
+    (* Add all other header entries except END *)
+    let sortlst = ref [] in
+    Hashtbl.iter (fun key value ->
+      if not (List.mem key required) && key <> "END" then sortlst := (key, value) :: !sortlst
+    ) hdrh;
+    List.iter (fun (key,value) -> dumprec key value) (List.sort compare !sortlst);
+
+    (* Add END record *)
+    let end_record = "END" in
+    Bytes.blit_string end_record 0 header !pos (String.length end_record);
+    pos := !pos + 80;
+    
+    (* Calculate final header size to ensure multiple of 2880 bytes *)
+    let final_header_size = ((!pos + 2879) / 2880) * 2880 in
+    
+    (* Write the header to the file *)
+    output out_fd header 0 final_header_size;
+    final_header_size
+  with e ->
+    Printf.eprintf "Error writing FITS header: %s\n" (Printexc.to_string e);
+    raise e
+
+(* Write RGB image data to a FITS file *)
+let write_rgb_data_to_fits output_path hdrh rgb_data =
+  try
+    (* Get image dimensions *)
+    let height = Array.length rgb_data in
+    let width = Array.length rgb_data.(0) in
+    
+    (* Update header with image dimensions *)
+    Hashtbl.replace hdrh "NAXIS1" (sprintf " = %d / Width in pixels" width);
+    Hashtbl.replace hdrh "NAXIS2" (sprintf " = %d / Height in pixels" height);
+    Hashtbl.replace hdrh "NAXIS3" (sprintf " = 3 / Number of color planes (RGB)");
+    Hashtbl.replace hdrh "BITPIX" (sprintf " = 16 / 16-bit integers");
+    Hashtbl.replace hdrh "BZERO" (sprintf " = 32768 / Offset to unsigned short range");
+    Hashtbl.replace hdrh "BSCALE" (sprintf " = 1 / Default scaling factor");
+    
+    (* Open output file *)
+    let out_fd = open_out_bin output_path in
+    
+    (* Write the header *)
+    let header_size = write_fits_header out_fd hdrh in
+    
+    (* Write the RGB data - one plane at a time (R, G, B) *)
+    let plane_size = width * height * 2 in (* 16 bits per pixel = 2 bytes *)
+    let buffer = Bytes.create (width * 2) in
+    
+    (* Write red plane *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        let (r, _, _) = rgb_data.(y).(x) in
+        let value = min 65535 (max 0 r) in
+        Bytes.set buffer (x * 2) (char_of_int (value lsr 8));
+        Bytes.set buffer (x * 2 + 1) (char_of_int (value land 0xFF));
+      done;
+      output out_fd buffer 0 (width * 2);
+    done;
+    
+    (* Write green plane *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        let (_, g, _) = rgb_data.(y).(x) in
+        let value = min 65535 (max 0 g) in
+        Bytes.set buffer (x * 2) (char_of_int (value lsr 8));
+        Bytes.set buffer (x * 2 + 1) (char_of_int (value land 0xFF));
+      done;
+      output out_fd buffer 0 (width * 2);
+    done;
+    
+    (* Write blue plane *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        let (_, _, b) = rgb_data.(y).(x) in
+        let value = min 65535 (max 0 b) in
+        Bytes.set buffer (x * 2) (char_of_int (value lsr 8));
+        Bytes.set buffer (x * 2 + 1) (char_of_int (value land 0xFF));
+      done;
+      output out_fd buffer 0 (width * 2);
+    done;
+    
+    (* Pad data to multiple of 2880 bytes *)
+    let data_size = plane_size * 3 in
+    let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
+    if padding_size > 0 then
+      output_string out_fd (String.make padding_size '\000');
+    
+    close_out out_fd;
+    true
+  with e ->
+    Printf.eprintf "Error writing RGB data to FITS: %s\n" (Printexc.to_string e);
+    false
 
 (* Properly parse FITS header string value by removing quotes and comments *)
 let parse_string_header hdrh key =
@@ -203,6 +308,13 @@ let rec create_dir d =
       eprintf "  Error creating directory %s: %s\n" d (Printexc.to_string e)
   end else if not (Sys.is_directory d) then
     eprintf "  Warning: %s exists but is not a directory\n" d
+
+let just_header filename =    
+        let fd = open_in_bin filename in
+	let hdrh = Hashtbl.create 257 in
+	let () = scan_header hdrh (read_header fd "") 0 in
+	close_in fd;        
+        hdrh
 
 (* Copy FITS file with header updates *)
 let copy_fits_with_updates source_path target_path updates =

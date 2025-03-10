@@ -97,7 +97,6 @@ let group_dark_frames dark_files master_dir =
   ) temp_bins [] in
   
   Array.of_list groups
-
 (* Create master dark in memory and use it directly *)
 let create_and_use_master_dark group =
   printf "Creating master dark for temperature bin %d (%.1f°C) from %d files...\n" 
@@ -106,12 +105,12 @@ let create_and_use_master_dark group =
   if Array.length group.files = 0 then
     failwith "No dark frames to average";
   
-  (* Read the first dark to get dimensions *)
+  (* Read the first dark to get dimensions and header *)
   let first_dark = group.files.(0) in
   let img = read_image first_dark in
-  let hdrh, contents = find_header_end first_dark img in
-  let width = parse_int hdrh "NAXIS1" in
-  let height = parse_int hdrh "NAXIS2" in
+  let dark_hdrh, contents = find_header_end first_dark img in
+  let width = parse_int dark_hdrh "NAXIS1" in
+  let height = parse_int dark_hdrh "NAXIS2" in
   
   printf "  Dark frame dimensions: %dx%d\n" width height;
   
@@ -148,10 +147,10 @@ let create_and_use_master_dark group =
   done;
   
   printf "  Master dark created in memory\n";
-  master_dark
+  (master_dark, dark_hdrh)  (* Return both the dark data and its header *)
 
-(* Apply dark frame calibration to an image using in-memory master dark *)
-let calibrate_image_in_memory image_path master_dark output_path =
+(* Apply dark frame calibration to an image using in-memory master dark with Bayer pattern awareness *)
+let calibrate_image_in_memory image_path (master_dark, dark_hdrh) output_path =
   printf "Calibrating %s using in-memory master dark\n" 
     (Filename.basename image_path);
   
@@ -167,13 +166,41 @@ let calibrate_image_in_memory image_path master_dark output_path =
     failwith (sprintf "Image dimensions (%dx%d) don't match dark frame (%dx%d)"
                 width height (Array.length master_dark.(0)) (Array.length master_dark));
   
+  (* Check Bayer pattern orientation *)
+  let dark_pattern = get_bayer_pattern dark_hdrh in
+  let light_pattern = get_bayer_pattern hdrh in
+  
+  let need_rotation = 
+    match (dark_pattern, light_pattern) with
+    | (Some pattern1, Some pattern2) -> 
+        if pattern1 = pattern2 then begin
+          printf "  Bayer patterns match (%s)\n" (describe_bayer_pattern pattern1);
+          false
+        end else begin
+          printf "  Bayer patterns don't match (%s vs %s) - rotating dark\n" 
+            (describe_bayer_pattern pattern1) (describe_bayer_pattern pattern2);
+          true
+        end
+    | _ -> 
+        (* If we can't determine patterns, assume they match *)
+        false
+  in
+  
   (* Create calibrated data *)
   let cal_data = Array.make_matrix height width 0 in
   
   for y = 0 to height - 1 do
     for x = 0 to width - 1 do
+      (* Get dark value, applying rotation if needed *)
+      let dark_value = 
+        if need_rotation then
+          int_of_float master_dark.(height - 1 - y).(width - 1 - x)
+        else
+          int_of_float master_dark.(y).(x)
+      in
+      
       (* Subtract dark value, ensuring we don't go below zero *)
-      let cal_value = max 0 (image_data.(y).(x) - int_of_float master_dark.(y).(x)) in
+      let cal_value = max 0 (image_data.(y).(x) - dark_value) in
       cal_data.(y).(x) <- cal_value
     done
   done;
@@ -185,28 +212,17 @@ let calibrate_image_in_memory image_path master_dark output_path =
   
   (* Save as FITS *)
   let oc = open_out_bin output_path in
-  
-  (* Create a copy of the original header *)
-  let header_lines = ref [] in
-  Hashtbl.iter (fun key value ->
-    if key <> "END" then
-      header_lines := (key ^ value) :: !header_lines
-  ) hdrh;
+  let newh = Hashtbl.copy hdrh in
   
   (* Add calibration info *)
-  header_lines := sprintf "%-80s" "IMAGETYP= 'CALIBRATED'         / Calibrated image" :: !header_lines;
-  header_lines := sprintf "%-80s" "DARKSUB = 'MEMORY'             / Dark subtraction applied in memory" :: !header_lines;
+  Hashtbl.add newh "IMAGETYP=" "'CALIBRATED'          / Calibrated image";
   
-  (* Add END keyword *)
-  header_lines := sprintf "%-80s" "END" :: !header_lines;
+  (* Add rotation info if applied *)
+  if need_rotation then
+    Hashtbl.add newh "DARKROT" "'YES'                 / Dark frame rotated 180 degrees";
   
   (* Write header *)
-  let header = String.concat "" (List.rev !header_lines) in
-  output_string oc header;
-  
-  (* Pad header to multiple of 2880 bytes *)
-  let padding = String.make (2880 - (String.length header mod 2880)) ' ' in
-  output_string oc padding;
+  let siz = write_fits_header oc newh in
   
   (* Write data *)
   for y = 0 to height - 1 do
