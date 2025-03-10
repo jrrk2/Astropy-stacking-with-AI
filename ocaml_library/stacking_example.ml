@@ -188,7 +188,7 @@ let example_stacking_methods input_dir =
     printf "Selected %s as reference frame\n" (Filename.basename files.(ref_idx));
     
     (* Try different stacking methods *)
-    let methods = [
+    let stack_methods = [
       "average", Average;
       "median", Median;
       "sigma_clip_3", SigmaClip 3.0;
@@ -197,17 +197,17 @@ let example_stacking_methods input_dir =
     
     let success_count = ref 0 in
     
-    List.iter (fun (name, method_) ->
+    List.iter (fun (name, stack_method) ->
       let output_file = sprintf "stacked_%s.fits" name in
       printf "\nStacking with %s method...\n" name;
       
-      match stack_auto files ref_idx method_ output_file with
+      match stack_auto files ref_idx stack_method output_file with
       | Some r ->
           printf "  Success! Output saved to %s\n" output_file;
           incr success_count
       | None ->
           printf "  Failed to stack with %s method\n" name
-    ) methods;
+    ) stack_methods;
     
     printf "\nCompleted %d/%d stacking operations\n" !success_count (List.length methods);
     !success_count > 0

@@ -101,6 +101,18 @@ dec_deg: float;
 mag_v: float option;
 }
 
+(* Implementation of List.take function *)
+module List = struct
+  include List  (* Include all the standard List module functions *)
+  
+  (* Take the first n elements of a list *)
+  let rec take n lst =
+    if n <= 0 then []
+    else match lst with
+      | [] -> []
+      | hd :: tl -> hd :: take (n-1) tl
+end
+
 (* Helper for pattern matching on tuples *)
 let fst3 (a, _, _) = a
 let snd3 (_, b, _) = b

@@ -39,6 +39,11 @@
   (libraries str unix cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules altaz altaz_to_radec simbad query_simbad simbad_main))
 
+(executable
+  (name stack_cli)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis debayer_integration image_alignment stack_cli))
+
 (library
   (name types)
   (preprocess (pps ppx_deriving_yojson))

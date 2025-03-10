@@ -3,7 +3,6 @@
 open Types
 open Fits
 open Printf
-open Util
 
 (* Types for star detection and alignment *)
 type star_point = {
@@ -375,7 +374,7 @@ let align_images files reference_idx detection_params =
   end
 
 (* Stack images using given method *)
-let stack_images files reference_idx method output_path =
+let rec stack_images files reference_idx stacking_method output_path =
   if Array.length files = 0 then
     None
   else begin
@@ -433,7 +432,7 @@ let stack_images files reference_idx method output_path =
       let output_data = Array.make_matrix height width 0 in
       
       let apply_method values =
-        match method with
+        match stacking_method with
         | Average ->
             (* Calculate mean *)
             let sum = ref 0 in
@@ -534,14 +533,14 @@ let stack_images files reference_idx method output_path =
       
       (* Write output FITS file *)
       let success = write_stacked_image output_path ref_hdrh output_data 
-                      aligned_files method in
+                      aligned_files stacking_method in
       
       if success then
         Some {
           reference_image = files.(reference_idx);
           aligned_images = aligned_files;
           failed_images = failed_files;
-          stacking_method = method;
+          stacking_method = stacking_method;
           output_file = output_path;
         }
       else
@@ -550,13 +549,13 @@ let stack_images files reference_idx method output_path =
   end
 
 (* Write stacked image to FITS file with updated header *)
-and write_stacked_image output_path ref_hdrh data aligned_files method =
+and write_stacked_image output_path ref_hdrh data aligned_files stacking_method =
   try
     (* Create a copy of the reference header *)
     let header = Hashtbl.copy ref_hdrh in
     
     (* Update header with stacking information *)
-    let method_str = match method with
+    let method_str = match stacking_method with
       | Average -> "AVERAGE"
       | Median -> "MEDIAN"
       | SigmaClip sigma -> Printf.sprintf "SIGCLIP-%.1f" sigma
@@ -612,7 +611,7 @@ and write_stacked_image output_path ref_hdrh data aligned_files method =
     false
 
 (* Write stacked RGB image *)
-let write_stacked_rgb_image output_path ref_hdrh rgb_data aligned_files method =
+let write_stacked_rgb_image output_path ref_hdrh rgb_data aligned_files stacking_method =
   try
     (* Create a copy of the reference header *)
     let header = Hashtbl.copy ref_hdrh in
@@ -622,7 +621,7 @@ let write_stacked_rgb_image output_path ref_hdrh rgb_data aligned_files method =
     Hashtbl.replace header "NAXIS3" (sprintf " = 3 / Number of color planes (RGB)");
     
     (* Add stacking information *)
-    let method_str = match method with
+    let method_str = match stacking_method with
       | Average -> "AVERAGE"
       | Median -> "MEDIAN"
       | SigmaClip sigma -> Printf.sprintf "SIGCLIP-%.1f" sigma
@@ -659,7 +658,7 @@ let create_rgb_from_mono r_data g_data b_data width height =
   rgb_data
 
 (* Stack RGB image sequence (three grayscale images per frame) *)
-let stack_rgb_images r_files g_files b_files reference_idx method output_path =
+let stack_rgb_images r_files g_files b_files reference_idx stacking_method output_path =
   if Array.length r_files = 0 || 
      Array.length g_files = 0 || 
      Array.length b_files = 0 then begin
@@ -673,13 +672,13 @@ let stack_rgb_images r_files g_files b_files reference_idx method output_path =
   end else begin
     (* Stack each channel separately *)
     printf "Stacking red channel...\n";
-    let r_result = stack_images r_files reference_idx method (output_path ^ ".r.fits") in
+    let r_result = stack_images r_files reference_idx stacking_method (output_path ^ ".r.fits") in
     
     printf "Stacking green channel...\n";
-    let g_result = stack_images g_files reference_idx method (output_path ^ ".g.fits") in
+    let g_result = stack_images g_files reference_idx stacking_method (output_path ^ ".g.fits") in
     
     printf "Stacking blue channel...\n";
-    let b_result = stack_images b_files reference_idx method (output_path ^ ".b.fits") in
+    let b_result = stack_images b_files reference_idx stacking_method (output_path ^ ".b.fits") in
     
     match r_result, g_result, b_result with
     | Some r, Some g, Some b ->
@@ -707,13 +706,13 @@ let stack_rgb_images r_files g_files b_files reference_idx method output_path =
         let rgb_data = create_rgb_from_mono r_data g_data b_data width height in
         
         (* Write combined RGB FITS *)
-        if write_stacked_rgb_image output_path r_hdrh rgb_data r.aligned_images method then
+        if write_stacked_rgb_image output_path r_hdrh rgb_data r.aligned_images stacking_method then
           Some {
             reference_image = r.reference_image;
             aligned_images = r.aligned_images;
             failed_images = Array.append r.failed_images 
                              (Array.append g.failed_images b.failed_images);
-            stacking_method = method;
+            stacking_method = stacking_method;
             output_file = output_path;
           }
         else
@@ -724,7 +723,7 @@ let stack_rgb_images r_files g_files b_files reference_idx method output_path =
   end
 
 (* Stack aligned frames from a Bayer RGB image sequence *)
-let stack_bayer_images files reference_idx pattern method output_path =
+let stack_bayer_images files reference_idx pattern stacking_method output_path =
   if Array.length files = 0 then
     None
   else begin
@@ -782,7 +781,7 @@ let stack_bayer_images files reference_idx pattern method output_path =
       let output_data = Array.make_matrix height width 0 in
       
       let apply_method values =
-        match method with
+        match stacking_method with
         | Average ->
             (* Calculate mean *)
             let sum = ref 0 in
@@ -872,29 +871,29 @@ let stack_bayer_images files reference_idx pattern method output_path =
       (* First save the stacked monochrome image *)
       let mono_output_path = Filename.remove_extension output_path ^ "_mono.fits" in
       let mono_success = write_stacked_image mono_output_path ref_hdrh output_data 
-                      aligned_files method in
+                      aligned_files stacking_method in
       
       (* Now debayer the stacked image to get RGB *)
       if mono_success then begin
         printf "Creating RGB image from debayered stacked image...\n";
         
-        let rgb_data = 
-          match pattern with
+        let rgb_data = (function
           | Some pattern ->
+              printf "Using %s Bayer pattern\n" (Debayer_integration.describe_bayer_pattern pattern);
               Debayer_integration.bin_bayer_pattern output_data width height (Some pattern)
           | None ->
               (* Default to RGGB if not specified *)
               printf "No Bayer pattern specified, defaulting to RGGB\n";
-              Debayer_integration.bin_bayer_pattern output_data width height (Some `RGGB)
+              Debayer_integration.bin_bayer_pattern output_data width height (Some `RGGB)) pattern
         in
         
         (* Write the RGB FITS *)
-        if write_stacked_rgb_image output_path ref_hdrh rgb_data aligned_files method then
+        if write_stacked_rgb_image output_path ref_hdrh rgb_data aligned_files stacking_method then
           Some {
             reference_image = files.(reference_idx);
             aligned_images = aligned_files;
             failed_images = failed_files;
-            stacking_method = method;
+            stacking_method = stacking_method;
             output_file = output_path;
           }
         else
@@ -907,7 +906,7 @@ let stack_bayer_images files reference_idx pattern method output_path =
   end
 
 (* Main stacking function with auto-detection of image type *)
-let stack_auto files reference_idx method output_path =
+let stack_auto files reference_idx stacking_method output_path =
   if Array.length files = 0 then begin
     printf "No files to stack\n";
     None
@@ -925,14 +924,14 @@ let stack_auto files reference_idx method output_path =
     
     if is_color then begin
       printf "Detected color image (NAXIS=%d), stacking as RGB\n" naxis;
-      stack_images files reference_idx method output_path
+      stack_images files reference_idx stacking_method output_path
     end else if bayer_pattern <> None then begin
       printf "Detected Bayer pattern: %s, stacking with debayering\n"
         (Debayer_integration.describe_bayer_pattern (Option.get bayer_pattern));
-      stack_bayer_images files reference_idx bayer_pattern method output_path
+      stack_bayer_images files reference_idx bayer_pattern stacking_method output_path
     end else begin
       printf "Detected monochrome image, stacking directly\n";
-      stack_images files reference_idx method output_path
+      stack_images files reference_idx stacking_method output_path
     end
   end
 

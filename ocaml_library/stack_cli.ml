@@ -11,7 +11,7 @@ let main () =
   let reference_idx = ref (-1) in
   let auto_reference = ref true in
   let pattern = ref None in
-  let stacking_method = ref Average in
+  let stacking_method_option = ref Average in
   let sigma = ref 3.0 in
   let kappa = ref 2.5 in
   let detection_threshold = ref 5.0 in
@@ -30,11 +30,11 @@ let main () =
   (* Parse stacking method *)
   let parse_method str =
     match String.uppercase_ascii str with
-    | "AVERAGE" | "MEAN" -> stacking_method := Average
-    | "MEDIAN" -> stacking_method := Median
-    | "SIGMACLIP" | "SIGMA" -> stacking_method := SigmaClip !sigma
-    | "KAPPA" -> stacking_method := Kappa !kappa
-    | "WEIGHTED" -> stacking_method := WeightedAverage
+    | "AVERAGE" | "MEAN" -> stacking_method_option := Average
+    | "MEDIAN" -> stacking_method_option := Median
+    | "SIGMACLIP" | "SIGMA" -> stacking_method_option := SigmaClip !sigma
+    | "KAPPA" -> stacking_method_option := Kappa !kappa
+    | "WEIGHTED" -> stacking_method_option := WeightedAverage
     | _ -> printf "Warning: Unknown stacking method '%s', using average\n" str
   in
   
@@ -63,9 +63,9 @@ let main () =
   end;
   
   (* Update stacking method with current sigma/kappa values *)
-  (match !stacking_method with
-   | SigmaClip _ -> stacking_method := SigmaClip !sigma
-   | Kappa _ -> stacking_method := Kappa !kappa
+  (match !stacking_method_option with
+   | SigmaClip _ -> stacking_method_option := SigmaClip !sigma
+   | Kappa _ -> stacking_method_option := Kappa !kappa
    | _ -> ());
   
   (* Find FITS files in the directory *)
@@ -109,7 +109,7 @@ let main () =
   printf "Using %s as reference image\n" (Filename.basename files.(ref_idx));
   
   (* Print stacking method *)
-  let method_str = match !stacking_method with
+  let method_str = match !stacking_method_option with
     | Average -> "Average"
     | Median -> "Median"
     | SigmaClip sigma -> sprintf "Sigma-clip (%.1f)" sigma
@@ -121,7 +121,7 @@ let main () =
   (* Perform stacking *)
   printf "Starting stacking process...\n";
   
-  let result = stack_auto files ref_idx !stacking_method !output_file in
+  let result = stack_auto files ref_idx !stacking_method_option !output_file in
   
   match result with
   | Some r ->

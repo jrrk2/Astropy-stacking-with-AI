@@ -1,17 +1,5 @@
 open Types
 
-(* Implementation of List.take function *)
-module List = struct
-  include List  (* Include all the standard List module functions *)
-  
-  (* Take the first n elements of a list *)
-  let rec take n lst =
-    if n <= 0 then []
-    else match lst with
-      | [] -> []
-      | hd :: tl -> hd :: take (n-1) tl
-end
-
 (* Pointing Model module *)
 
   let focus_to_temp _ = 0.0
