@@ -20,4 +20,7 @@ calibrate:
 	_build/default/dark_stack.exe -dark ../../dark_temps/temp_285 -light /Volumes/X10Pro/stellina-5df04c/2025-02-17_20-42-14_observation_M42/02-images-initial
 
 stack1:
-	env OCAMLRUNPARAM=b _build/default/stack_calibrated.exe calibrated
+	env OCAMLRUNPARAM=b _build/default/stack_calibrated.exe -input calibrated
+
+shar:
+	(cd _build/default && shar `ls -1 *.ml *.mli | fgrep -v .pp.` > ../../archive.shar.txt)

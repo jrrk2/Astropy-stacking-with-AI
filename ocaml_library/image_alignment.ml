@@ -610,15 +610,25 @@ and write_stacked_image output_path ref_hdrh data aligned_files stacking_method 
     printf "Error writing stacked image: %s\n" (Printexc.to_string e);
     false
 
-(* Write stacked RGB image *)
-let write_stacked_rgb_image output_path ref_hdrh rgb_data aligned_files stacking_method =
+(* Specialized function to write RGB FITS file with careful handling of the 3 planes *)
+let write_rgb_fits output_path hdrh rgb_data aligned_files stacking_method =
   try
     (* Create a copy of the reference header *)
-    let header = Hashtbl.copy ref_hdrh in
+    let header = Hashtbl.copy hdrh in
+    
+    (* Get image dimensions *)
+    let height = Array.length rgb_data in
+    let width = Array.length rgb_data.(0) in
+    printf "Writing RGB FITS with dimensions: %dx%d, 3 planes\n" width height;
     
     (* Update header for RGB FITS format *)
     Hashtbl.replace header "NAXIS" (sprintf " = 3 / Number of data axes");
+    Hashtbl.replace header "NAXIS1" (sprintf " = %d / Width in pixels" width);
+    Hashtbl.replace header "NAXIS2" (sprintf " = %d / Height in pixels" height);
     Hashtbl.replace header "NAXIS3" (sprintf " = 3 / Number of color planes (RGB)");
+    Hashtbl.replace header "BITPIX" (sprintf " = 16 / 16-bit integers");
+    Hashtbl.replace header "BZERO" (sprintf " = 32768 / Offset to unsigned short range");
+    Hashtbl.replace header "BSCALE" (sprintf " = 1 / Default scaling factor");
     
     (* Add stacking information *)
     let method_str = match stacking_method with
@@ -641,20 +651,88 @@ let write_stacked_rgb_image output_path ref_hdrh rgb_data aligned_files stacking
       Hashtbl.replace header key (Printf.sprintf " = %s%s" value comment);
     done;
     
-    (* Use the RGB helper function to write the data *)
-    Fits.write_rgb_data_to_fits output_path header rgb_data
+    if Array.length aligned_files > 10 then
+      Hashtbl.replace header "NIMGSRC=" (Printf.sprintf " = %d / Total number of source images" (Array.length aligned_files));
+    
+    (* Open output file *)
+    let out_fd = open_out_bin output_path in
+    
+    (* Write the header *)
+    let header_size = write_fits_header out_fd header in
+    printf "Wrote header of size %d bytes\n" header_size;
+    
+    (* Write the RGB data - one plane at a time (R, G, B) *)
+    let plane_size = width * height * 2 in (* 16 bits per pixel = 2 bytes *)
+    let buffer = Bytes.create (width * 2) in
+    
+    (* Function to write a single plane *)
+    let write_plane get_value =
+      for y = 0 to height - 1 do
+        for x = 0 to width - 1 do
+          let value = get_value rgb_data.(y).(x) in
+          Bytes.set buffer (x * 2) (char_of_int (value lsr 8));
+          Bytes.set buffer (x * 2 + 1) (char_of_int (value land 0xFF));
+        done;
+        output out_fd buffer 0 (width * 2);
+      done
+    in
+    
+    (* Write red plane *)
+    printf "Writing red plane...\n";
+    write_plane (fun (r, _, _) -> min 65535 (max 0 r));
+    
+    (* Write green plane *)
+    printf "Writing green plane...\n";
+    write_plane (fun (_, g, _) -> min 65535 (max 0 g));
+    
+    (* Write blue plane *)
+    printf "Writing blue plane...\n";
+    write_plane (fun (_, _, b) -> min 65535 (max 0 b));
+    
+    (* Pad data to multiple of 2880 bytes *)
+    let data_size = plane_size * 3 in
+    let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
+    if padding_size > 0 then begin
+      printf "Adding %d bytes of padding\n" padding_size;
+      output_string out_fd (String.make padding_size '\000');
+    end;
+    
+    close_out out_fd;
+    printf "Successfully wrote RGB FITS to %s\n" output_path;
+    true
   with e ->
-    printf "Error writing stacked RGB image: %s\n" (Printexc.to_string e);
+    printf "Error writing RGB FITS: %s\n" (Printexc.to_string e);
     false
 
 (* Helper function to create RGB data array from monochrome images *)
 let create_rgb_from_mono r_data g_data b_data width height =
   let rgb_data = Array.make_matrix height width (0, 0, 0) in
+  
+  (* Debug statistics for the mono channels *)
+  let r_sum = ref 0 in
+  let g_sum = ref 0 in
+  let b_sum = ref 0 in
+  let count = width * height in
+  
+  (* Fill the RGB array *)
   for y = 0 to height - 1 do
     for x = 0 to width - 1 do
-      rgb_data.(y).(x) <- (r_data.(y).(x), g_data.(y).(x), b_data.(y).(x))
+      let r = r_data.(y).(x) in
+      let g = g_data.(y).(x) in
+      let b = b_data.(y).(x) in
+      rgb_data.(y).(x) <- (r, g, b);
+      r_sum := !r_sum + r;
+      g_sum := !g_sum + g;
+      b_sum := !b_sum + b;
     done
   done;
+  
+  (* Print channel statistics *)
+  let r_avg = !r_sum / count in
+  let g_avg = !g_sum / count in
+  let b_avg = !b_sum / count in
+  printf "Channel averages: R=%d, G=%d, B=%d\n" r_avg g_avg b_avg;
+  
   rgb_data
 
 (* Stack RGB image sequence (three grayscale images per frame) *)
@@ -702,11 +780,42 @@ let stack_rgb_images r_files g_files b_files reference_idx stacking_method outpu
         let b_hdrh, b_contents = find_header_end (output_path ^ ".b.fits") b_img in
         let b_data = read_fits_data b_contents width height in
         
+        (* Debug information for channel data *)
+        printf "Channel data information:\n";
+        printf "  Red channel - min: %d, max: %d\n" 
+          (Array.fold_left (fun min_val row -> 
+            Array.fold_left (fun m v -> if v < m then v else m) min_val row) 65535 r_data)
+          (Array.fold_left (fun max_val row -> 
+            Array.fold_left (fun m v -> if v > m then v else m) max_val row) 0 r_data);
+        printf "  Green channel - min: %d, max: %d\n" 
+          (Array.fold_left (fun min_val row -> 
+            Array.fold_left (fun m v -> if v < m then v else m) min_val row) 65535 g_data)
+          (Array.fold_left (fun max_val row -> 
+            Array.fold_left (fun m v -> if v > m then v else m) max_val row) 0 g_data);
+        printf "  Blue channel - min: %d, max: %d\n" 
+          (Array.fold_left (fun min_val row -> 
+            Array.fold_left (fun m v -> if v < m then v else m) min_val row) 65535 b_data)
+          (Array.fold_left (fun max_val row -> 
+            Array.fold_left (fun m v -> if v > m then v else m) max_val row) 0 b_data);
+        
         (* Combine into RGB array *)
         let rgb_data = create_rgb_from_mono r_data g_data b_data width height in
         
-        (* Write combined RGB FITS *)
-        if write_stacked_rgb_image output_path r_hdrh rgb_data r.aligned_images stacking_method then
+        (* Debug sample of RGB pixels *)
+        printf "RGB combined data samples (first 5x5 pixels):\n";
+        for y = 0 to min 4 (height - 1) do
+          printf "  Row %d:" y;
+          for x = 0 to min 4 (width - 1) do
+            let (r, g, b) = rgb_data.(y).(x) in
+            printf " (%d,%d,%d)" r g b;
+          done;
+          printf "\n";
+        done;
+        
+        (* Write combined RGB FITS - enhanced version *)
+        let success = write_rgb_fits output_path r_hdrh rgb_data r.aligned_images stacking_method in
+        
+        if success then
           Some {
             reference_image = r.reference_image;
             aligned_images = r.aligned_images;
@@ -721,6 +830,43 @@ let stack_rgb_images r_files g_files b_files reference_idx stacking_method outpu
         printf "One or more color channels failed to stack\n";
         None
   end
+
+let debug_rgb_data width height rgb_data =
+        
+        (* Debug RGB data *)
+        printf "Bayer debayering produced RGB data\n";
+        let r_sum = ref 0 in
+        let g_sum = ref 0 in
+        let b_sum = ref 0 in
+        let count = width * height / 4 in  (* 2x2 binning reduces dimensions *)
+        
+        for y = 0 to Array.length rgb_data - 1 do
+          for x = 0 to Array.length rgb_data.(0) - 1 do
+            let (r, g, b) = rgb_data.(y).(x) in
+            r_sum := !r_sum + r;
+            g_sum := !g_sum + g;
+            b_sum := !b_sum + b;
+          done
+        done;
+        
+        if count > 0 then
+          printf "RGB averages: R=%d, G=%d, B=%d\n" 
+            (!r_sum / count) (!g_sum / count) (!b_sum / count);
+        
+        (* Sample a few pixels *)
+        let rgb_height = Array.length rgb_data in
+        let rgb_width = Array.length rgb_data.(0) in
+        printf "Debayered dimensions: %dx%d\n" rgb_width rgb_height;
+        
+        if rgb_height > 0 && rgb_width > 0 then begin
+          printf "Sample pixels:\n";
+          for y = 0 to min 2 (rgb_height - 1) do
+            for x = 0 to min 2 (rgb_width - 1) do
+              let (r, g, b) = rgb_data.(y).(x) in
+              printf "  (%d,%d): R=%d, G=%d, B=%d\n" x y r g b;
+            done
+          done
+        end        
 
 (* Stack aligned frames from a Bayer RGB image sequence *)
 let stack_bayer_images files reference_idx pattern stacking_method output_path =
@@ -861,7 +1007,7 @@ let stack_bayer_images files reference_idx pattern stacking_method output_path =
             if !count > 0 then !sum / !count else 0
       in
       
-      (* Apply stacking method to each pixel *)
+      (* Apply stacking stacking_method to each pixel *)
       for y = 0 to height - 1 do
         for x = 0 to width - 1 do
           output_data.(y).(x) <- apply_method stack_buffer.(y).(x)
@@ -888,7 +1034,7 @@ let stack_bayer_images files reference_idx pattern stacking_method output_path =
         in
         
         (* Write the RGB FITS *)
-        if write_stacked_rgb_image output_path ref_hdrh rgb_data aligned_files stacking_method then
+        if write_rgb_fits output_path ref_hdrh rgb_data aligned_files stacking_method then
           Some {
             reference_image = files.(reference_idx);
             aligned_images = aligned_files;
@@ -913,18 +1059,227 @@ let stack_auto files reference_idx stacking_method output_path =
   end else begin
     (* Read the first image to determine type *)
     let img = read_image files.(0) in
-    let hdrh, _ = find_header_end files.(0) img in
+    let hdrh, contents = find_header_end files.(0) img in
     
     (* Check for Bayer pattern *)
     let bayer_pattern = Debayer_integration.get_bayer_pattern hdrh in
     
-    (* Check for color planes *)
+    (* Check for color planes - enhanced detection *)
     let naxis = parse_int hdrh "NAXIS" in
-    let is_color = naxis = 3 || naxis = 4 in
+    printf "Image type detection: NAXIS=%d\n" naxis;
+    
+    (* Look for NAXIS3 if NAXIS=3 - this confirms it's color *)
+    let naxis3 = if naxis = 3 then 
+                   try parse_int hdrh "NAXIS3" 
+                   with _ -> 1
+                 else 1 in
+    printf "Image type detection: NAXIS3=%d\n" naxis3;
+    
+    (* More robust check for color images *)
+    let is_color = (naxis = 3 && naxis3 = 3) || 
+                   (try Hashtbl.mem hdrh "COLORIMG=" with _ -> false) in
+    
+    (* Debug print image metadata *)
+    printf "First image metadata:\n";
+    printf "  Filename: %s\n" (Filename.basename files.(0));
+    printf "  Dimensions: %dx%d\n" (parse_int hdrh "NAXIS1") (parse_int hdrh "NAXIS2");
+    printf "  NAXIS: %d\n" naxis;
+    printf "  Is color: %b\n" is_color;
+    printf "  Bayer pattern: %s\n" 
+      (match bayer_pattern with 
+       | Some p -> Debayer_integration.describe_bayer_pattern p 
+       | None -> "None");
     
     if is_color then begin
-      printf "Detected color image (NAXIS=%d), stacking as RGB\n" naxis;
-      stack_images files reference_idx stacking_method output_path
+      printf "Detected color image (NAXIS=%d, NAXIS3=%d), stacking as RGB\n" naxis naxis3;
+      printf "Using specialized RGB stacking path\n";
+      
+      (* Read dimensions from first file *)
+      let width = parse_int hdrh "NAXIS1" in
+      let height = parse_int hdrh "NAXIS2" in
+      
+      (* We need to handle RGB stacking differently - extract each plane *)
+      printf "Separating RGB planes for %d files...\n" (Array.length files);
+      
+      (* Process each file to extract RGB planes *)
+      let r_planes = ref [] in
+      let g_planes = ref [] in
+      let b_planes = ref [] in
+      
+      Array.iter (fun file ->
+        printf "Processing %s\n" (Filename.basename file);
+        try
+          let img = read_image file in
+          let hdrh, contents = find_header_end file img in
+          let width = parse_int hdrh "NAXIS1" in
+          let height = parse_int hdrh "NAXIS2" in
+          
+          (* Determine data offset and plane size *)
+          let data_offset = String.length contents - (width * height * 2 * 3) in
+          if data_offset < 0 then
+            printf "  Warning: Unexpected data size in %s\n" (Filename.basename file)
+          else begin
+            (* Extract each plane *)
+            let r_data = Array.make_matrix height width 0 in
+            let g_data = Array.make_matrix height width 0 in
+            let b_data = Array.make_matrix height width 0 in
+            
+            (* Read red plane *)
+            let plane_size = width * height * 2 in
+            for y = 0 to height - 1 do
+              for x = 0 to width - 1 do
+                let offset = data_offset + (y * width + x) * 2 in
+                if offset + 1 < String.length contents then
+                  r_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
+                                    (int_of_char contents.[offset + 1])
+              done
+            done;
+            
+            (* Read green plane *)
+            for y = 0 to height - 1 do
+              for x = 0 to width - 1 do
+                let offset = data_offset + plane_size + (y * width + x) * 2 in
+                if offset + 1 < String.length contents then
+                  g_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
+                                    (int_of_char contents.[offset + 1])
+              done
+            done;
+            
+            (* Read blue plane *)
+            for y = 0 to height - 1 do
+              for x = 0 to width - 1 do
+                let offset = data_offset + plane_size * 2 + (y * width + x) * 2 in
+                if offset + 1 < String.length contents then
+                  b_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
+                                    (int_of_char contents.[offset + 1])
+              done
+            done;
+            
+            (* Add to plane lists *)
+            r_planes := (file, r_data) :: !r_planes;
+            g_planes := (file, g_data) :: !g_planes;
+            b_planes := (file, b_data) :: !b_planes;
+            
+            (* Debug - print some stats *)
+            let r_sum = ref 0 in
+            let g_sum = ref 0 in
+            let b_sum = ref 0 in
+            for i = 0 to min 10 (width * height - 1) do
+              let y = i / width in
+              let x = i mod width in
+              r_sum := !r_sum + r_data.(y).(x);
+              g_sum := !g_sum + g_data.(y).(x);
+              b_sum := !b_sum + b_data.(y).(x);
+            done;
+            printf "  Sample averages (first 10 pixels): R=%d, G=%d, B=%d\n"
+              (!r_sum / 10) (!g_sum / 10) (!b_sum / 10);
+          end
+        with e ->
+          printf "  Error processing %s: %s\n" 
+            (Filename.basename file) (Printexc.to_string e)
+      ) files;
+      
+      (* If we successfully extracted planes, stack each separately *)
+      if List.length !r_planes > 0 && 
+         List.length !g_planes > 0 && 
+         List.length !b_planes > 0 then begin
+        printf "Extracted %d sets of RGB planes\n" (List.length !r_planes);
+        
+        (* Create temporary files for each plane *)
+        let tmp_dir = Filename.get_temp_dir_name () in
+        let base_name = Filename.remove_extension (Filename.basename output_path) in
+        
+        (* Function to write a plane to a temporary FITS file *)
+        let write_plane_to_file plane_data filename =
+          let out_fd = open_out_bin filename in
+          
+          (* Copy header from original but modify for single plane *)
+          let new_hdrh = Hashtbl.copy hdrh in
+          Hashtbl.replace new_hdrh "NAXIS" " = 2 / Number of data axes";
+          Hashtbl.remove new_hdrh "NAXIS3";
+          
+          (* Write header *)
+          ignore (write_fits_header out_fd new_hdrh);
+          
+          (* Write data *)
+          for y = 0 to height - 1 do
+            for x = 0 to width - 1 do
+              let value = plane_data.(y).(x) in
+              output_byte out_fd (value lsr 8);
+              output_byte out_fd (value land 0xFF);
+            done
+          done;
+          
+          close_out out_fd;
+          filename
+        in
+        
+        (* Write each plane to temporary files *)
+        let r_files = List.mapi (fun i (file, data) ->
+          let tmp_file = Printf.sprintf "%s/%s_r_%03d.fits" tmp_dir base_name i in
+          write_plane_to_file data tmp_file
+        ) !r_planes in
+        
+        let g_files = List.mapi (fun i (file, data) ->
+          let tmp_file = Printf.sprintf "%s/%s_g_%03d.fits" tmp_dir base_name i in
+          write_plane_to_file data tmp_file
+        ) !g_planes in
+        
+        let b_files = List.mapi (fun i (file, data) ->
+          let tmp_file = Printf.sprintf "%s/%s_b_%03d.fits" tmp_dir base_name i in
+          write_plane_to_file data tmp_file
+        ) !b_planes in
+        
+        (* Now stack each channel separately and combine *)
+        printf "Stacking individual color planes...\n";
+        let r_output = Printf.sprintf "%s/%s_r_stacked.fits" tmp_dir base_name in
+        let g_output = Printf.sprintf "%s/%s_g_stacked.fits" tmp_dir base_name in
+        let b_output = Printf.sprintf "%s/%s_b_stacked.fits" tmp_dir base_name in
+        
+        let r_result = stack_images (Array.of_list r_files) reference_idx stacking_method r_output in
+        let g_result = stack_images (Array.of_list g_files) reference_idx stacking_method g_output in
+        let b_result = stack_images (Array.of_list b_files) reference_idx stacking_method b_output in
+        
+        match r_result, g_result, b_result with
+        | Some r, Some g, Some b ->
+            (* Read the stacked color planes *)
+            printf "Combining stacked color planes...\n";
+            
+            let r_img = read_image r_output in
+            let r_hdrh, r_contents = find_header_end r_output r_img in
+            let r_data = read_fits_data r_contents width height in
+            
+            let g_img = read_image g_output in
+            let g_hdrh, g_contents = find_header_end g_output g_img in
+            let g_data = read_fits_data g_contents width height in
+            
+            let b_img = read_image b_output in
+            let b_hdrh, b_contents = find_header_end b_output b_img in
+            let b_data = read_fits_data b_contents width height in
+            
+            (* Combine the color planes *)
+            let rgb_data = create_rgb_from_mono r_data g_data b_data width height in
+            
+            (* Write the combined RGB FITS *)
+            if write_rgb_fits output_path r_hdrh rgb_data (Array.of_list r_files) stacking_method then begin
+              printf "Successfully stacked and combined RGB planes to %s\n" output_path;
+              Some {
+                reference_image = files.(reference_idx);
+                aligned_images = files;
+                failed_images = [||];
+                stacking_method = stacking_method;
+                output_file = output_path;
+              }
+            end else
+              None
+        | _ ->
+            printf "Failed to stack one or more color planes\n";
+            None
+      end else begin
+        printf "Failed to extract color planes from input files\n";
+        printf "Falling back to standard stacking method\n";
+        stack_images files reference_idx stacking_method output_path
+      end
     end else if bayer_pattern <> None then begin
       printf "Detected Bayer pattern: %s, stacking with debayering\n"
         (Debayer_integration.describe_bayer_pattern (Option.get bayer_pattern));

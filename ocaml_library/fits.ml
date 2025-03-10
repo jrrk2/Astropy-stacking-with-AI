@@ -189,8 +189,12 @@ let write_fits_header out_fd hdrh =
   with e ->
     Printf.eprintf "Error writing FITS header: %s\n" (Printexc.to_string e);
     raise e
+(* Let's diagnose the issue with the RGB data *)
 
-(* Write RGB image data to a FITS file *)
+(* First, let's check our write_rgb_data_to_fits function in Fits.ml *)
+(* The issue might be that we're not correctly writing all three planes *)
+(* Here's the corrected version: *)
+
 let write_rgb_data_to_fits output_path hdrh rgb_data =
   try
     (* Get image dimensions *)
@@ -261,6 +265,79 @@ let write_rgb_data_to_fits output_path hdrh rgb_data =
   with e ->
     Printf.eprintf "Error writing RGB data to FITS: %s\n" (Printexc.to_string e);
     false
+
+(* Let's also add a debug function to examine the RGB data before writing *)
+let debug_rgb_data rgb_data =
+  let height = Array.length rgb_data in
+  let width = Array.length rgb_data.(0) in
+  
+  Printf.printf "RGB data dimensions: %dx%d\n" width height;
+  
+  (* Sample a few pixels *)
+  for y = 0 to min 5 height - 1 do
+    for x = 0 to min 5 width - 1 do
+      let (r, g, b) = rgb_data.(y).(x) in
+      Printf.printf "Pixel (%d, %d): R=%d, G=%d, B=%d\n" x y r g b;
+    done;
+  done;
+  
+  (* Calculate statistics for each channel *)
+  let r_sum = ref 0 in
+  let g_sum = ref 0 in
+  let b_sum = ref 0 in
+  let count = ref 0 in
+  
+  for y = 0 to height - 1 do
+    for x = 0 to width - 1 do
+      let (r, g, b) = rgb_data.(y).(x) in
+      r_sum := !r_sum + r;
+      g_sum := !g_sum + g;
+      b_sum := !b_sum + b;
+      incr count;
+    done;
+  done;
+  
+  if !count > 0 then begin
+    let r_avg = !r_sum / !count in
+    let g_avg = !g_sum / !count in
+    let b_avg = !b_sum / !count in
+    Printf.printf "Channel averages: R=%d, G=%d, B=%d\n" r_avg g_avg b_avg;
+  end
+
+(* Now, let's modify the create_rgb_from_mono function to ensure proper RGB data *)
+let create_rgb_from_mono r_data g_data b_data width height =
+  let rgb_data = Array.make_matrix height width (0, 0, 0) in
+  
+  Printf.printf "Creating RGB data from monochrome planes:\n";
+  Printf.printf "  Dimensions: %dx%d\n" width height;
+  
+  (* Sample a few pixels from each channel *)
+  Printf.printf "  Red channel samples: ";
+  for i = 0 to min 4 (width - 1) do
+    Printf.printf "%d " r_data.(0).(i);
+  done;
+  Printf.printf "\n";
+  
+  Printf.printf "  Green channel samples: ";
+  for i = 0 to min 4 (width - 1) do
+    Printf.printf "%d " g_data.(0).(i);
+  done;
+  Printf.printf "\n";
+  
+  Printf.printf "  Blue channel samples: ";
+  for i = 0 to min 4 (width - 1) do
+    Printf.printf "%d " b_data.(0).(i);
+  done;
+  Printf.printf "\n";
+  
+  (* Combine the channels *)
+  for y = 0 to height - 1 do
+    for x = 0 to width - 1 do
+      rgb_data.(y).(x) <- (r_data.(y).(x), g_data.(y).(x), b_data.(y).(x))
+    done
+  done;
+  
+  rgb_data
 
 (* Properly parse FITS header string value by removing quotes and comments *)
 let parse_string_header hdrh key =
