@@ -111,14 +111,13 @@ data
 
 let required' hdrh =
   ["SIMPLE";"BITPIX";"NAXIS"] @ (List.init (parse_int hdrh "NAXIS") (fun ix -> "NAXIS"^string_of_int (ix+1)))
-
-(* Write FITS header from a hash table *)
+(* Improved write_fits_header function with better buffer handling *)
 let write_fits_header out_fd hdrh =
   try
     (* Create a properly formatted header *)
     let header_size = 2880 in  (* Starting with one block *)
-    let header = Bytes.create header_size in
-    Bytes.fill header 0 header_size ' ';
+    let header = ref (Bytes.create header_size) in
+    Bytes.fill (!header) 0 header_size ' ';
 
     let pos = ref 0 in
     let required = required' hdrh in
@@ -126,28 +125,39 @@ let write_fits_header out_fd hdrh =
     (* Helper function to add a record to the header *)
     let dumprec key value' =
       (* Check if we need to extend the header *)
-      if !pos + 80 > Bytes.length header then begin
-        let new_size = Bytes.length header + header_size in
+      if !pos + 80 > Bytes.length (!header) then begin
+        let new_size = Bytes.length (!header) + header_size in
         let new_header = Bytes.create new_size in
         Bytes.fill new_header 0 new_size ' ';
-        Bytes.blit header 0 new_header 0 (Bytes.length header);
-        Bytes.fill new_header (Bytes.length header) header_size ' ';
-        Bytes.blit header 0 new_header 0 (Bytes.length header);
+        Bytes.blit (!header) 0 new_header 0 (Bytes.length (!header));
+        (* Fix: This is where the error occurs - we weren't updating the header reference *)
+        header := new_header;
       end;
       
-      (* Write the keyword *)
-      Bytes.blit_string key 0 header !pos (String.length key);
-      Bytes.set header (!pos + 8) '=';
+      (* Safety check for key length to avoid buffer overflow *)
+      let key_len = min (String.length key) 8 in
+      (* Write the keyword with safety bounds *)
+      Bytes.blit_string key 0 (!header) !pos key_len;
       
-      (* Write the value and comment *)
+      (* Set the equals sign if there's room *)
+      if !pos + 8 < Bytes.length (!header) then
+        Bytes.set (!header) (!pos + 8) '=';
+      
+      (* Write the value and comment with safety bounds *)
       let value = 
         try 
           let eq = String.index value' '=' + 1 in 
           String.sub value' eq (String.length value' - eq) 
         with _ -> value' 
       in
-      let len = min (String.length value) 71 in
-      Bytes.blit_string value 0 header (!pos+9) len;
+      
+      let max_value_len = min (String.length value) 71 in
+      let safe_end = min (!pos + 9 + max_value_len) (Bytes.length (!header)) in
+      let safe_len = safe_end - (!pos + 9) in
+      
+      if safe_len > 0 then
+        Bytes.blit_string value 0 (!header) (!pos + 9) safe_len;
+      
       pos := !pos + 80 
     in
 
@@ -171,28 +181,32 @@ let write_fits_header out_fd hdrh =
     (* Add all other header entries except END *)
     let sortlst = ref [] in
     Hashtbl.iter (fun key value ->
-      if not (List.mem key required) && key <> "END" then sortlst := (key, value) :: !sortlst
+      if not (List.mem key required) && key <> "END" then 
+        sortlst := (key, value) :: !sortlst
     ) hdrh;
+    
     List.iter (fun (key,value) -> dumprec key value) (List.sort compare !sortlst);
 
-    (* Add END record *)
+    (* Add END record with safety check *)
     let end_record = "END" in
-    Bytes.blit_string end_record 0 header !pos (String.length end_record);
+    let end_len = String.length end_record in
+    
+    if !pos + end_len <= Bytes.length (!header) then
+      Bytes.blit_string end_record 0 (!header) !pos end_len;
+    
     pos := !pos + 80;
     
     (* Calculate final header size to ensure multiple of 2880 bytes *)
     let final_header_size = ((!pos + 2879) / 2880) * 2880 in
+    let final_header_size = min final_header_size (Bytes.length (!header)) in
     
     (* Write the header to the file *)
-    output out_fd header 0 final_header_size;
+    output out_fd (!header) 0 final_header_size;
     final_header_size
   with e ->
     Printf.eprintf "Error writing FITS header: %s\n" (Printexc.to_string e);
     raise e
-(* Let's diagnose the issue with the RGB data *)
 
-(* First, let's check our write_rgb_data_to_fits function in Fits.ml *)
-(* The issue might be that we're not correctly writing all three planes *)
 (* Here's the corrected version: *)
 
 let write_rgb_data_to_fits output_path hdrh rgb_data =

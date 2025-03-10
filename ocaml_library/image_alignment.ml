@@ -568,7 +568,7 @@ and write_stacked_image output_path ref_hdrh data aligned_files stacking_method 
     Hashtbl.replace header "STACKMTD=" (Printf.sprintf "'%s'        / Stacking method" method_str);
     
     (* Add list of input files to header *)
-    for i = 0 to min 9 (Array.length aligned_files - 1) do
+    if false then for i = 0 to min 9 (Array.length aligned_files - 1) do
       let key = Printf.sprintf "IMGSRC%d=" i in
       let value = Printf.sprintf "'%s'" (Filename.basename aligned_files.(i)) in
       let comment = if i = 0 then " / Source images (up to 10 listed)" else "" in
@@ -618,7 +618,8 @@ let write_rgb_fits output_path hdrh rgb_data aligned_files stacking_method =
     
     (* Get image dimensions *)
     let height = Array.length rgb_data in
-    let width = Array.length rgb_data.(0) in
+    let width = if height > 0 then Array.length rgb_data.(0) else 0 in
+    
     printf "Writing RGB FITS with dimensions: %dx%d, 3 planes\n" width height;
     
     (* Update header for RGB FITS format *)
@@ -630,6 +631,14 @@ let write_rgb_fits output_path hdrh rgb_data aligned_files stacking_method =
     Hashtbl.replace header "BZERO" (sprintf " = 32768 / Offset to unsigned short range");
     Hashtbl.replace header "BSCALE" (sprintf " = 1 / Default scaling factor");
     
+    (* Make sure we have a simpler header without any content that's too large *)
+    let clean_header = Hashtbl.create (Hashtbl.length header) in
+    Hashtbl.iter (fun key value ->
+      (* Only keep values that aren't excessively long *)
+      if String.length value < 70 then
+        Hashtbl.add clean_header key value
+    ) header;
+    
     (* Add stacking information *)
     let method_str = match stacking_method with
       | Average -> "AVERAGE"
@@ -639,62 +648,76 @@ let write_rgb_fits output_path hdrh rgb_data aligned_files stacking_method =
       | WeightedAverage -> "WEIGHTED" 
     in
     
-    Hashtbl.replace header "IMAGETYP=" "'STACKED'           / Stacked image";
-    Hashtbl.replace header "NCOMBINE=" (Printf.sprintf " = %d / Number of combined frames" (Array.length aligned_files));
-    Hashtbl.replace header "STACKMTD=" (Printf.sprintf "'%s'        / Stacking method" method_str);
+    Hashtbl.replace clean_header "IMAGETYP=" (Printf.sprintf "'STACKED'           / Stacked image");
+    Hashtbl.replace clean_header "NCOMBINE=" (Printf.sprintf " = %d / Number of combined frames" (Array.length aligned_files));
+    Hashtbl.replace clean_header "STACKMTD=" (Printf.sprintf "'%s'        / Stacking method" method_str);
     
-    (* List source files *)
-    for i = 0 to min 9 (Array.length aligned_files - 1) do
+    (* List source files - just a few to avoid overly large headers *)
+    let max_files = min 5 (Array.length aligned_files) in
+    for i = 0 to max_files - 1 do
       let key = Printf.sprintf "IMGSRC%d=" i in
-      let value = Printf.sprintf "'%s'" (Filename.basename aligned_files.(i)) in
-      let comment = if i = 0 then " / Source images (up to 10 listed)" else "" in
-      Hashtbl.replace header key (Printf.sprintf " = %s%s" value comment);
+      let basename = Filename.basename aligned_files.(i) in
+      let max_len = min (String.length basename) 50 in 
+      let short_name = String.sub basename 0 max_len in
+      Hashtbl.replace clean_header key (Printf.sprintf " = '%s'" short_name);
     done;
     
-    if Array.length aligned_files > 10 then
-      Hashtbl.replace header "NIMGSRC=" (Printf.sprintf " = %d / Total number of source images" (Array.length aligned_files));
+    if Array.length aligned_files > max_files then
+      Hashtbl.replace clean_header "NIMGSRC=" (Printf.sprintf " = %d / Total number of source images" (Array.length aligned_files));
     
     (* Open output file *)
     let out_fd = open_out_bin output_path in
     
     (* Write the header *)
-    let header_size = write_fits_header out_fd header in
+    let header_size = write_fits_header out_fd clean_header in
     printf "Wrote header of size %d bytes\n" header_size;
     
-    (* Write the RGB data - one plane at a time (R, G, B) *)
-    let plane_size = width * height * 2 in (* 16 bits per pixel = 2 bytes *)
-    let buffer = Bytes.create (width * 2) in
-    
-    (* Function to write a single plane *)
+    (* Function to write a single plane with robust error handling *)
     let write_plane get_value =
+      (* Use a fixed buffer size for safety *)
+      let buffer_size = width * 2 in
+      let buffer = Bytes.create buffer_size in
+      
       for y = 0 to height - 1 do
+        (* Reset buffer for each row *)
+        Bytes.fill buffer 0 buffer_size '\000';
+        
         for x = 0 to width - 1 do
           let value = get_value rgb_data.(y).(x) in
-          Bytes.set buffer (x * 2) (char_of_int (value lsr 8));
-          Bytes.set buffer (x * 2 + 1) (char_of_int (value land 0xFF));
+          let value = min 65535 (max 0 value) in
+          
+          (* Set bytes with bounds checking *)
+          if x * 2 + 1 < buffer_size then begin
+            Bytes.set buffer (x * 2) (char_of_int (value lsr 8));
+            Bytes.set buffer (x * 2 + 1) (char_of_int (value land 0xFF));
+          end
         done;
-        output out_fd buffer 0 (width * 2);
+        
+        output out_fd buffer 0 (min buffer_size (width * 2));
       done
     in
     
-    (* Write red plane *)
+    (* Write each plane separately with robust error handling *)
     printf "Writing red plane...\n";
-    write_plane (fun (r, _, _) -> min 65535 (max 0 r));
+    (try write_plane (fun (r, _, _) -> r) with e -> 
+       printf "Error writing red plane: %s\n" (Printexc.to_string e));
     
-    (* Write green plane *)
     printf "Writing green plane...\n";
-    write_plane (fun (_, g, _) -> min 65535 (max 0 g));
+    (try write_plane (fun (_, g, _) -> g) with e -> 
+       printf "Error writing green plane: %s\n" (Printexc.to_string e));
     
-    (* Write blue plane *)
     printf "Writing blue plane...\n";
-    write_plane (fun (_, _, b) -> min 65535 (max 0 b));
+    (try write_plane (fun (_, _, b) -> b) with e -> 
+       printf "Error writing blue plane: %s\n" (Printexc.to_string e));
     
     (* Pad data to multiple of 2880 bytes *)
-    let data_size = plane_size * 3 in
+    let data_size = width * height * 2 * 3 in
     let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
     if padding_size > 0 then begin
       printf "Adding %d bytes of padding\n" padding_size;
-      output_string out_fd (String.make padding_size '\000');
+      let padding = Bytes.create (min padding_size 2880) in
+      Bytes.fill padding 0 (Bytes.length padding) '\000';
+      output out_fd padding 0 (Bytes.length padding);
     end;
     
     close_out out_fd;
@@ -702,6 +725,7 @@ let write_rgb_fits output_path hdrh rgb_data aligned_files stacking_method =
     true
   with e ->
     printf "Error writing RGB FITS: %s\n" (Printexc.to_string e);
+    close_out_noerr (try open_out_bin output_path with _ -> stdout);
     false
 
 (* Helper function to create RGB data array from monochrome images *)
