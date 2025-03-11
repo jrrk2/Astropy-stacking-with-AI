@@ -15,6 +15,11 @@ type wcs_params = {
   equinox: float;    (* Equinox of coordinates *)
 }
 
+let print_memory_usage label =
+  let stat = Gc.stat () in
+  print_endline (Printf.sprintf "%s: Heap words: %d, Live words: %d, Free words: %d\n" 
+    label stat.heap_words stat.live_words stat.free_words)
+
 (* Extract WCS information from FITS header *)
 let extract_wcs_params header =
   try
@@ -487,9 +492,9 @@ let astrometric_stack_cli args =
   let input_files = ref [] in
   
   (* Parse command line *)
-  let i = ref 0 in
+  let i = ref 1 in
   while !i < Array.length args do
-    match args.(!i) with
+    (match args.(!i) with
     | "-o" -> 
         incr i;
         if !i < Array.length args then
@@ -517,7 +522,7 @@ let astrometric_stack_cli args =
     | arg when Filename.check_suffix arg ".fits" || Filename.check_suffix arg ".fit" ->
         input_files := arg :: !input_files
     | _ -> ()
-    ;
+    );
     incr i
   done;
   
@@ -544,15 +549,16 @@ let astrometric_stack_cli args =
     Printf.printf "  -method <method>  Stacking method: average, median, sigmaclip, kappa, weighted\n";
     Printf.printf "  -sigma <value>    Sigma value for sigmaclip method (default: 3.0)\n";
     Printf.printf "  -kappa <value>    Kappa value for kappa method (default: 3.0)\n";
-    exit 1
-  end;
-  
-  Printf.printf "Astrometric Stacking\n";
-  Printf.printf "===================\n";
-  Printf.printf "Input files: %d\n" (List.length input_files);
-  Printf.printf "Stacking method: %s\n" !stack_method;
-  Printf.printf "Output file: %s\n\n" !output_file;
-  flush stdout;
-  
-  (* Perform stacking *)
-  stack_astrometric input_files method_type !output_file
+    false
+  end else begin
+    Printf.printf "Astrometric Stacking\n";
+    Printf.printf "===================\n";
+    Printf.printf "Input files: %d\n" (List.length input_files);
+    Printf.printf "Stacking method: %s\n" !stack_method;
+    Printf.printf "Output file: %s\n\n" !output_file;
+    flush stdout;
+
+    (* Perform stacking *)
+    print_memory_usage "Before aligned_data creation";
+    stack_astrometric input_files method_type !output_file
+  end
