@@ -1,6 +1,4 @@
 (* astrometric_stack_cli.ml - Command line tool for astrometric stacking *)
-open Types
-open Printf
 open Astrometric_alignment
 
 let usage = "Usage: astrometric_stack_cli [options] file1.fits file2.fits ...\n\
@@ -18,4 +16,4 @@ let usage = "Usage: astrometric_stack_cli [options] file1.fits file2.fits ...\n\
             \  astrometric_stack_cli -list images.txt -method sigmaclip -sigma 2.5\n"
 
 (* Program entry point *)
-let () = astrometric_stack_cli Sys.argv
+let _ = astrometric_stack_cli Sys.argv

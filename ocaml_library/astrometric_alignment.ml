@@ -1,7 +1,6 @@
 (* astrometric_alignment.ml - Functions for alignment based on plate solving data *)
 open Types
 open Fits
-open Printf
 
 (* WCS parameters from plate solved FITS headers *)
 type wcs_params = {
@@ -201,23 +200,33 @@ let calculate_stack_dimensions files =
     ] in
     (file, wcs, width, height, ra_dec_corners)
   ) !image_params in
-  
-  (* Find the min/max RA and Dec across all corners *)
+
+(* Find the min/max RA and Dec across all corners *)
   let ra_min = ref 360.0 in
   let ra_max = ref 0.0 in
   let dec_min = ref 90.0 in
   let dec_max = ref (-90.0) in
   
+  (* First check if any images cross the 0/360 boundary *)
+  let crosses_boundary = ref false in
+  List.iter (fun (_, _, _, _, corners) ->
+    for i = 0 to List.length corners - 1 do
+      for j = i + 1 to List.length corners - 1 do
+        let (ra1, _) = List.nth corners i in
+        let (ra2, _) = List.nth corners j in
+        if abs_float (ra1 -. ra2) > 180.0 then
+          crosses_boundary := true
+      done
+    done
+  ) corners;
+  
+  (* Now process all corners *)
   List.iter (fun (_, _, _, _, corners) ->
     List.iter (fun (ra, dec) ->
       (* Handle RA wrap around at 0/360 degrees *)
       let ra_norm = 
-        if List.exists (fun (_, _, _, _, c) -> 
-            List.exists (fun (r, _) -> abs_float (r -. ra) > 180.0) c
-          ) corners 
-        then
-          (* We have images that cross the 0/360 boundary *)
-          if ra > 180.0 then ra else ra +. 360.0
+        if !crosses_boundary && ra < 180.0 then
+          ra +. 360.0
         else
           ra
       in
