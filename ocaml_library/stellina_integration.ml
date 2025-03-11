@@ -234,6 +234,118 @@ let apply_model_correction model fits_path output_path =
       eprintf "  Error applying model correction: %s\n" (Printexc.to_string e);
       false
 
+(* Apply dark calibration to a light frame *)
+let apply_dark_calibration darks_dir light_file output_file =
+  try
+    (* Get temperature from light frame *)
+    let hdrh = just_header light_file in
+    let temp = get_temperature hdrh in
+    
+    printf "  Processing %s (Temperature: %.1f°C)\n" 
+      (Filename.basename light_file) temp;
+    
+    (* Create calibration options *)
+    let options = {
+      Dark_calibration.dark_dir = darks_dir;
+      light_dir = Filename.dirname light_file;
+      output_dir = Filename.dirname output_file;
+      temp_tolerance = 2.0;
+      force_rebuild = false;
+      apply_only = true;
+      master_dark_dir = Filename.concat darks_dir "master_darks";
+      verbose = false;
+    } in
+    
+    (* Create a specialized processor for a single file *)
+    let process_single_file () =
+      (* Find and group dark frames *)
+      printf "  Scanning dark frames from %s...\n" options.dark_dir;
+      let dark_files = Dark_calibration.find_fits_files options.dark_dir in
+      
+      if Array.length dark_files = 0 then begin
+        printf "  No dark frames found in %s\n" options.dark_dir;
+        false
+      end else begin
+        printf "  Found %d dark frames\n" (Array.length dark_files);
+        
+        (* Group dark frames by temperature *)
+        let groups = Hashtbl.create 10 in
+        
+        Array.iter (fun filename ->
+          try
+            let hdrh = just_header filename in
+            let dark_temp = get_temperature hdrh in
+            let temp_bin = int_of_float (floor (dark_temp +. 273.15 +. 0.5)) in
+            
+            let bin_files = match Hashtbl.find_opt groups temp_bin with
+              | Some files -> filename :: files
+              | None -> [filename]
+            in
+            Hashtbl.replace groups temp_bin bin_files
+          with _ ->
+            printf "  Warning: Could not read temperature from %s\n" filename
+        ) dark_files;
+        
+        (* Find closest temperature bin *)
+        let temp_bins = Hashtbl.fold (fun bin _ acc -> bin :: acc) groups [] in
+        let temp_bins = List.sort compare temp_bins in
+        
+        if List.length temp_bins = 0 then begin
+          printf "  No valid temperature bins found\n";
+          false
+        end else begin
+          let temp_k = int_of_float (floor (temp +. 273.15 +. 0.5)) in
+          
+          (* Find closest bin *)
+          let closest_bin = ref 0 in
+          let min_diff = ref 1000 in
+          
+          List.iter (fun bin ->
+            let diff = abs (bin - temp_k) in
+            if diff < !min_diff then begin
+              min_diff := diff;
+              closest_bin := bin
+            end
+          ) temp_bins;
+          
+          let bin_temp_c = float_of_int !closest_bin -. 273.15 in
+          printf "  Using dark frames from bin %d (%.1f°C), diff: %.1f°C\n" 
+            !closest_bin bin_temp_c (abs_float (bin_temp_c -. temp));
+          
+          (* Check if temperature difference is acceptable *)
+          if abs_float (bin_temp_c -. temp) > options.temp_tolerance then begin
+            printf "  Temperature difference exceeds tolerance (%.1f°C)\n" 
+              options.temp_tolerance;
+            false
+          end else begin
+            (* Get files for this bin *)
+            let bin_files = Hashtbl.find groups !closest_bin in
+            let bin_files_array = Array.of_list bin_files in
+            
+            (* Create dark group for this bin *)
+            let dark_group = {
+              Dark_calibration.temp_bin = !closest_bin;
+              temperature = bin_temp_c;
+              files = bin_files_array;
+              master_path = None;
+            } in
+            
+            (* Create and use master dark directly *)
+            let master_dark, dark_hdrh = Dark_calibration.create_and_use_master_dark dark_group in
+            
+            (* Apply calibration *)
+            Dark_calibration.calibrate_image_in_memory light_file (master_dark, dark_hdrh) output_file;
+            true
+          end
+        end
+      end
+    in
+    
+    process_single_file ()
+  with e ->
+    eprintf "  Error applying dark calibration: %s\n" (Printexc.to_string e);
+    false
+
 (* Process directory with enhanced error handling - from stellina_process.ml *)
 let process_directory src_dir flags =
   let {
@@ -416,18 +528,17 @@ let process_directory src_dir flags =
                 
                 (* Copy file if doesn't exist *)
                 if not (Sys.file_exists new_path) then begin
+                  (* Create updates list *)
+                  let updates = [
+                    ("MOUNTRA", Printf.sprintf "%f" ra, "Mount RA (deg)");
+                    ("MOUNTDEC", Printf.sprintf "%f" dec, "Mount DEC (deg)");
+                    ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
+                    ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
+                  ] in
 
-		  (* Create updates list *)
-		  let updates = [
-		    ("MOUNTRA", Printf.sprintf "%f" ra, "Mount RA (deg)");
-		    ("MOUNTDEC", Printf.sprintf "%f" dec, "Mount DEC (deg)");
-		    ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
-		    ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
-		  ] in
-
-		  if copy_fits_with_updates fits_file new_path updates then begin
-		    printf "  Created and annotated %s\n" new_path;
-		    processed := !processed + 1;
+                  if copy_fits_with_updates fits_file new_path updates then begin
+                    printf "  Created and annotated %s\n" new_path;
+                    processed := !processed + 1;
                     
                     (* Apply pointing model if available *)
                     if Option.is_some pointing_model then begin
@@ -466,17 +577,32 @@ let process_directory src_dir flags =
                     if calibrate then begin
                       match darks_dir with
                       | Some dark_dir ->
-                          (* Calibration implementation would go here *)
-                          (* For now, just count as success *)
-                          printf "  Calibration would be applied from %s\n" dark_dir;
-                          calibrated := !calibrated + 1
+                          (* Create calibrated output path *)
+                          let cal_path = get_new_filepath new_path ~base_dir ~calibrated:true () in
+                          (match cal_path with
+                          | Some calibrated_path ->
+                              printf "  Applying dark calibration to %s\n" (Filename.basename new_path);
+                              printf "  Output path: %s\n" calibrated_path;
+                              
+                              (* Create directory if needed *)
+                              let cal_dir = Filename.dirname calibrated_path in
+                              if not (Sys.file_exists cal_dir) then
+                                create_dir cal_dir;
+                                
+                              (* Apply the calibration *)
+                              if apply_dark_calibration dark_dir new_path calibrated_path then begin
+                                printf "  Successfully calibrated image\n";
+                                calibrated := !calibrated + 1;
+                              end
+                          | None ->
+                              printf "  Error determining calibrated output path\n")
                       | None ->
                           printf "  Warning: No darks directory specified for calibration\n"
                     end
-		  end else begin
-		    eprintf "  Failed to copy and annotate FITS file\n";
-		    errors := !errors + 1
-		  end
+                  end else begin
+                    eprintf "  Failed to copy and annotate FITS file\n";
+                    errors := !errors + 1
+                  end
                 end else begin
                   printf "  Skipped - file already exists\n";
                   skipped := !skipped + 1

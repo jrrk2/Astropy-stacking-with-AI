@@ -1,10 +1,4 @@
 (executable
-  (name stellina_process)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
-  (modules fits util jsonParser quaternion pointingModel pointing_integration 
-           altaz altaz_to_radec simbad query_simbad stellina_process))
- 
-(executable
   (name altaz_radec_model)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils memtrace)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model))
