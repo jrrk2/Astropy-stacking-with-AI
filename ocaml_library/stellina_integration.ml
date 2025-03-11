@@ -31,6 +31,9 @@ type stellina_process_flags = {
   plate_scale: float;
 }
 
+(* Cache for master darks to avoid rebuilding *)
+let (master_dark_cache:(int,'a)Hashtbl.t) = Hashtbl.create 10
+
 (* Default processing flags *)
 let default_process_flags = {
   base_dir = "lights";
@@ -234,7 +237,82 @@ let apply_model_correction model fits_path output_path =
       eprintf "  Error applying model correction: %s\n" (Printexc.to_string e);
       false
 
-(* Apply dark calibration to a light frame *)
+(* Function to get a master dark from cache or build it *)
+let get_master_dark bin_temp bin_path =
+  if Hashtbl.mem master_dark_cache bin_temp then begin
+    printf "  Using cached master dark for bin %d\n" bin_temp;
+    Some (Hashtbl.find master_dark_cache bin_temp)
+  end else begin
+    (* Create dark group for this bin *)
+    let dark_files = Dark_calibration.find_fits_files bin_path in
+    if Array.length dark_files = 0 then
+      None
+    else begin
+      let bin_temp_c = float_of_int bin_temp -. 273.15 in
+      let dark_group = {
+        Dark_calibration.temp_bin = bin_temp;
+        temperature = bin_temp_c;
+        files = dark_files;
+        master_path = None;
+      } in
+      
+      printf "  Creating master dark for bin %d (%.1f°C) from %d frames...\n" 
+        bin_temp bin_temp_c (Array.length dark_files);
+      
+      let master_dark = Dark_calibration.create_and_use_master_dark dark_group in
+      Hashtbl.add master_dark_cache bin_temp master_dark;
+      Some master_dark
+    end
+  end
+
+(* Function to find appropriate temperature bin *)
+let find_temp_bin darks_dir temp temp_tolerance =
+  let temp_k = int_of_float (floor (temp +. 273.15 +. 0.5)) in
+  
+  (* Look for matching temperature directory *)
+  let temp_dir = sprintf "temp_%d" temp_k in
+  let temp_path = Filename.concat darks_dir temp_dir in
+  
+  (* Check exact match first *)
+  if Sys.file_exists temp_path && Sys.is_directory temp_path then
+    Some (temp_k, temp_path)
+  else begin
+    (* If no exact match, try to find the closest bin directory *)
+    let temp_bins = ref [] in
+    
+    (* Scan dark_temps to find all temperature bin directories *)
+    (try
+      Array.iter (fun entry ->
+        let full_path = Filename.concat darks_dir entry in
+        if Sys.is_directory full_path && 
+           String.length entry > 5 && 
+           String.sub entry 0 5 = "temp_" then begin
+          try
+            let bin_temp = int_of_string (String.sub entry 5 (String.length entry - 5)) in
+            temp_bins := (bin_temp, full_path) :: !temp_bins
+          with _ -> ()
+        end
+      ) (Sys.readdir darks_dir)
+    with _ -> ());
+    
+    (* Sort bins by temperature difference *)
+    let sorted_bins = List.sort 
+      (fun (t1, _) (t2, _) -> compare (abs (t1 - temp_k)) (abs (t2 - temp_k)))
+      !temp_bins in
+    
+    match sorted_bins with
+    | [] -> None
+    | (bin_temp, bin_path) :: _ ->
+        let bin_temp_c = float_of_int bin_temp -. 273.15 in
+        let temp_diff = abs_float (bin_temp_c -. temp) in
+        
+        if temp_diff <= temp_tolerance then
+          Some (bin_temp, bin_path)
+        else
+          None
+  end
+
+(* Apply dark calibration to a light frame with caching *)
 let apply_dark_calibration darks_dir light_file output_file =
   try
     (* Get temperature from light frame *)
@@ -245,150 +323,33 @@ let apply_dark_calibration darks_dir light_file output_file =
     printf "  Processing %s (Temperature: %.1f°C, bin temp_%d)\n" 
       (Filename.basename light_file) temp temp_k;
     
-    (* Look for matching temperature directory *)
-    let temp_dir = sprintf "temp_%d" temp_k in
-    let temp_path = Filename.concat darks_dir temp_dir in
-    
-    (* Create calibration options *)
-    let options = {
-      Dark_calibration.dark_dir = 
-        if Sys.file_exists temp_path && Sys.is_directory temp_path then
-          temp_path  (* Use the matching temperature directory *)
-        else
-          darks_dir; (* Use the base directory as fallback *)
-      light_dir = Filename.dirname light_file;
-      output_dir = Filename.dirname output_file;
-      temp_tolerance = 2.0;
-      force_rebuild = false;
-      apply_only = true;
-      master_dark_dir = Filename.concat darks_dir "master_darks";
-      verbose = false;
-    } in
-    
-    (* Create a specialized processor for a single file *)
-    let process_single_file () =
-      (* Find dark frames - first check temperature bin directory *)
-      let dark_files = 
-        if Sys.file_exists temp_path && Sys.is_directory temp_path then begin
-          printf "  Found matching temperature bin directory: %s\n" temp_path;
-          Dark_calibration.find_fits_files temp_path
-        end else begin
-          (* If no exact match, try to find the closest bin directory *)
-          printf "  No exact temperature bin match found, searching nearby bins...\n";
-          let temp_bins = ref [] in
-          
-          (* Scan dark_temps to find all temperature bin directories *)
-          (try
-            Array.iter (fun entry ->
-              let full_path = Filename.concat darks_dir entry in
-              if Sys.is_directory full_path && 
-                 String.length entry > 5 && 
-                 String.sub entry 0 5 = "temp_" then begin
-                try
-                  let bin_temp = int_of_string (String.sub entry 5 (String.length entry - 5)) in
-                  temp_bins := (bin_temp, full_path) :: !temp_bins
-                with _ -> ()
-              end
-            ) (Sys.readdir darks_dir)
-          with _ -> ());
-          
-          (* Sort bins by temperature difference *)
-          let sorted_bins = List.sort 
-            (fun (t1, _) (t2, _) -> compare (abs (t1 - temp_k)) (abs (t2 - temp_k)))
-            !temp_bins in
-          
-          match sorted_bins with
-          | [] -> 
-              printf "  No temperature bin directories found\n";
-              [||]
-          | (bin_temp, bin_path) :: _ ->
-              let bin_temp_c = float_of_int bin_temp -. 273.15 in
-              printf "  Using closest temperature bin: %s (%.1f°C, diff: %.1f°C)\n" 
-                bin_path bin_temp_c (abs_float (bin_temp_c -. temp));
-              Dark_calibration.find_fits_files bin_path
-        end
-      in
-      
-      if Array.length dark_files = 0 then begin
-        printf "  No dark frames found\n";
+    (* Find appropriate master dark using the temperature bin functions *)
+    let temp_tolerance = 2.0 in
+    match find_temp_bin darks_dir temp temp_tolerance with
+    | None -> 
+        printf "  No suitable temperature bin found within %.1f°C tolerance\n" temp_tolerance;
         false
-      end else begin
-        printf "  Found %d dark frames\n" (Array.length dark_files);
+    | Some (bin_temp, bin_path) ->
+        let bin_temp_c = float_of_int bin_temp -. 273.15 in
+        printf "  Using temperature bin: %s (%.1f°C, diff: %.1f°C)\n" 
+          bin_path bin_temp_c (abs_float (bin_temp_c -. temp));
         
-        (* Group dark frames by temperature *)
-        let groups = Hashtbl.create 10 in
-        
-        Array.iter (fun filename ->
-          try
-            let hdrh = just_header filename in
-            let dark_temp = get_temperature hdrh in
-            let temp_bin = int_of_float (floor (dark_temp +. 273.15 +. 0.5)) in
-            
-            let bin_files = match Hashtbl.find_opt groups temp_bin with
-              | Some files -> filename :: files
-              | None -> [filename]
-            in
-            Hashtbl.replace groups temp_bin bin_files
-          with _ ->
-            printf "  Warning: Could not read temperature from %s\n" filename
-        ) dark_files;
-        
-        (* Find closest temperature bin *)
-        let temp_bins = Hashtbl.fold (fun bin _ acc -> bin :: acc) groups [] in
-        let temp_bins = List.sort compare temp_bins in
-        
-        if List.length temp_bins = 0 then begin
-          printf "  No valid temperature bins found\n";
-          false
-        end else begin
-          let temp_k = int_of_float (floor (temp +. 273.15 +. 0.5)) in
-          
-          (* Find closest bin *)
-          let closest_bin = ref 0 in
-          let min_diff = ref 1000 in
-          
-          List.iter (fun bin ->
-            let diff = abs (bin - temp_k) in
-            if diff < !min_diff then begin
-              min_diff := diff;
-              closest_bin := bin
-            end
-          ) temp_bins;
-          
-          let bin_temp_c = float_of_int !closest_bin -. 273.15 in
-          printf "  Using dark frames from bin %d (%.1f°C), diff: %.1f°C\n" 
-            !closest_bin bin_temp_c (abs_float (bin_temp_c -. temp));
-          
-          (* Check if temperature difference is acceptable *)
-          if abs_float (bin_temp_c -. temp) > options.temp_tolerance then begin
-            printf "  Temperature difference exceeds tolerance (%.1f°C)\n" 
-              options.temp_tolerance;
+        match get_master_dark bin_temp bin_path with
+        | None -> 
+            printf "  Failed to create master dark\n";
             false
-          end else begin
-            (* Get files for this bin *)
-            let bin_files = Hashtbl.find groups !closest_bin in
-            let bin_files_array = Array.of_list bin_files in
-            
-            (* Create dark group for this bin *)
-            let dark_group = {
-              Dark_calibration.temp_bin = !closest_bin;
-              temperature = bin_temp_c;
-              files = bin_files_array;
-              master_path = None;
-            } in
-            
-            (* Create and use master dark directly *)
-            let master_dark, dark_hdrh = Dark_calibration.create_and_use_master_dark dark_group in
-            
+        | Some (master_dark, dark_hdrh) ->
             (* Apply calibration *)
+            printf "  Applying calibration using master dark\n";
+            
+            (* Create output directory if needed *)
+            let dir = Filename.dirname output_file in
+            if not (Sys.file_exists dir) then
+              create_dir dir;
+            
+            (* Perform the calibration *)
             Dark_calibration.calibrate_image_in_memory light_file (master_dark, dark_hdrh) output_file;
             true
-          end
-        end
-      end
-    in
-    
-    process_single_file ()
   with e ->
     eprintf "  Error applying dark calibration: %s\n" (Printexc.to_string e);
     false
@@ -636,10 +597,11 @@ let process_directory src_dir flags =
                               if not (Sys.file_exists cal_dir) then
                                 create_dir cal_dir;
                                 
-                              (* Apply the calibration *)
+                              (* Apply the calibration with caching *)
                               if apply_dark_calibration dark_dir new_path calibrated_path then begin
                                 printf "  Successfully calibrated image\n";
                                 calibrated := !calibrated + 1;
+			        flush stdout;
                               end
                           | None ->
                               printf "  Error determining calibrated output path\n")
@@ -670,6 +632,18 @@ let process_directory src_dir flags =
         errors := !errors + 1
   ) !pairs;
   
+  (* Print master dark cache statistics *)
+  let cache_size = Hashtbl.length master_dark_cache in
+  if cache_size > 0 then begin
+    printf "\nMaster dark cache statistics:\n";
+    printf "  %d temperature bins in cache\n" cache_size;
+    printf "  Cached temperature bins: ";
+    Hashtbl.iter (fun bin_temp _ ->
+      printf "temp_%d " bin_temp
+    ) master_dark_cache;
+    printf "\n";
+  end;
+  
   printf "\nSummary:\n";
   printf "  Processed: %d\n" !processed;
   printf "  Skipped: %d\n" !skipped;
@@ -684,6 +658,61 @@ let process_directory src_dir flags =
   end;
   
   (!processed, !skipped, !errors, !calibrated, !registration_added, !registration_failed)
+
+(* Export function to process a batch with calibration *)
+let process_with_dark_calibration darks_dir light_dir output_dir temp_tolerance =
+  (* Look for all light frames *)
+  let light_files = Dark_calibration.find_fits_files light_dir in
+  
+  if Array.length light_files = 0 then begin
+    printf "No light frames found in %s\n" light_dir;
+    (0, 0)
+  end else begin
+    printf "Found %d light frames in %s\n" (Array.length light_files) light_dir;
+    
+    (* Create output directory if needed *)
+    if not (Sys.file_exists output_dir) then begin
+      try Unix.mkdir output_dir 0o755 
+      with _ -> printf "Error creating output directory %s\n" output_dir
+    end;
+    
+    (* Process each light frame *)
+    let processed = ref 0 in
+    let errors = ref 0 in
+    
+    Array.iter (fun light_file ->
+      (* Determine output path *)
+      let basename = Filename.basename light_file in
+      let output_path = Filename.concat output_dir ("cal_" ^ basename) in
+      
+      printf "Processing %s...\n" basename;
+      
+      (* Apply calibration *)
+      if apply_dark_calibration darks_dir light_file output_path then begin
+        printf "Successfully calibrated to %s\n" output_path;
+        incr processed
+      end else begin
+        printf "Failed to calibrate %s\n" basename;
+        incr errors
+      end
+    ) light_files;
+    
+    (* Print master dark cache statistics *)
+    let cache_size = Hashtbl.length master_dark_cache in
+    printf "\nMaster dark cache statistics:\n";
+    printf "  %d temperature bins in cache\n" cache_size;
+    
+    if cache_size > 0 then begin
+      printf "  Cached temperature bins: ";
+      Hashtbl.iter (fun bin_temp _ ->
+        printf "temp_%d " bin_temp
+      ) master_dark_cache;
+      printf "\n";
+    end;
+    
+    printf "Calibration complete: %d processed, %d errors\n" !processed !errors;
+    (!processed, !errors)
+  end
 
 (* Main function with command-line argument parsing *)
 let main () =
