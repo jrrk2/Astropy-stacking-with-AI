@@ -888,7 +888,7 @@ let align_image src_data width height params =
   dest_data
 
 (* Align all images to a reference image *)
-let align_images_by_star files reference_idx detection_params =
+let align_images files reference_idx detection_params =
   if Array.length files = 0 then
     [||], [||]  (* Return empty arrays *)
   else begin
@@ -971,8 +971,6 @@ let align_images_by_star files reference_idx detection_params =
     Array.of_list (List.rev !aligned_images), 
     Array.of_list (List.rev !failed_images)
   end
-
-let align_images = Lacaml_only_alignment.align_images
 
 (* Stack images using given method *)
 let stack_images files reference_idx stacking_method output_path =
