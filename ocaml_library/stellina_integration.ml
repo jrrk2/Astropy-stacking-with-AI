@@ -118,10 +118,12 @@ let get_new_filepath fits_path ?(base_dir="lights") ?(calibrated=false) () =
       None
 
 (* Verify coordinates are close to target object - from stellina_process.ml *)
-let verify_coordinates calc_ra calc_dec target_name ?(max_separation_deg=1.0) () =
+let verify_coordinates context calc_ra calc_dec target_name ?(max_separation_deg=1.0) () =
   match QuerySimbad.get_object_coordinates target_name with
   | None -> (false, None, None)
   | Some (target_ra, target_dec) ->
+      let alt_calc, az_calc, hour_calc = Unified_interface.radec_to_altaz context target_ra target_dec in
+      printf "Target ALT=%.4f, AZ=%.4f, HA=%.4f\n" alt_calc az_calc hour_calc;
       (* Calculate angular distance using spherical trigonometry *)
       let ra1_rad = calc_ra *. Float.pi /. 180.0 in
       let dec1_rad = calc_dec *. Float.pi /. 180.0 in
@@ -146,7 +148,7 @@ let verify_coordinates calc_ra calc_dec target_name ?(max_separation_deg=1.0) ()
       (is_valid, Some separation_deg, Some (target_ra, target_dec))
 
 (* Annotate FITS with JSON data - from stellina_process.ml *)
-let annotate_fits_from_json json_path fits_path pointing_model =
+let annotate_fits_from_json context json_path fits_path pointing_model =
   try
     (* Open the JSON file *)
     let json = Yojson.Basic.from_file json_path in
@@ -161,7 +163,6 @@ let annotate_fits_from_json json_path fits_path pointing_model =
     let hdrh = just_header fits_path in
     
     (* Calculate RA/DEC from Alt/Az *)
-    let context = create_context 52.2 0.12 in
     let (ra, dec, _) = altaz_to_radec context alt az in
     
     printf "  Annotated FITS with ALT/AZ: %.2f°, %.2f° → RA/DEC: %.4f°, %.4f°\n" 
@@ -251,6 +252,8 @@ let process_directory src_dir flags =
     longitude;
     plate_scale;
   } = flags in
+
+  let local_context = create_context latitude longitude in
   
   printf "\nScanning directory: %s\n" src_dir;
   
@@ -368,10 +371,12 @@ let process_directory src_dir flags =
       let motors = json |> member "motors" in
       let alt = motors |> member "ALT" |> to_float in
       let az = motors |> member "AZ" |> to_float in
-      printf "  ALT/AZ: %.2f°, %.2f°\n" alt az;
-      
+      (* get timestamp *)
+      let hdrh = just_header fits_file in
+      let timestamp = get_timestamp hdrh in
+      printf "  ALT/AZ: %.2f°, %.2f°, stamp=%.3f\n" alt az timestamp;
+      let context = {local_context with timestamp=Some timestamp} in
       (* Calculate RA/Dec from Alt/Az *)
-      let context = create_context latitude longitude in
       let (ra, dec, _) = altaz_to_radec context alt az in
       printf "  Calculated RA/Dec: %.4f°, %.4f°\n" ra dec;
       
@@ -382,7 +387,7 @@ let process_directory src_dir flags =
         | Some ((target_ra, target_dec), target_name) ->
             (* Check if the coordinates are within acceptable range *)
             let (is_valid, separation, _) = 
-              verify_coordinates ra dec target_name ~max_separation_deg () in
+              verify_coordinates context ra dec target_name ~max_separation_deg () in
             
             if not is_valid then begin
               printf "  Skipping - separation too large (%.2f°)\n" 
@@ -411,16 +416,6 @@ let process_directory src_dir flags =
                 
                 (* Copy file if doesn't exist *)
                 if not (Sys.file_exists new_path) then begin
-		  (* Parse JSON data to extract values for headers *)
-		  let json = Yojson.Basic.from_file json_file in
-		  let open Yojson.Basic.Util in
-		  let motors = json |> member "motors" in
-		  let alt = motors |> member "ALT" |> to_float in
-		  let az = motors |> member "AZ" |> to_float in
-
-		  (* Calculate RA/Dec from Alt/Az *)
-		  let context = create_context latitude longitude in
-                  let (ra, dec, _) = altaz_to_radec context alt az in
 
 		  (* Create updates list *)
 		  let updates = [
@@ -519,7 +514,7 @@ let process_directory src_dir flags =
 
 (* Main function with command-line argument parsing *)
 let main () =
-  let usage = "Usage: stellina_process [OPTIONS] directory" in
+  let usage = "Usage: "^Sys.argv.(0)^" [OPTIONS] directory" in
   let directory = ref "" in
   let output = ref "lights" in
   let target = ref None in

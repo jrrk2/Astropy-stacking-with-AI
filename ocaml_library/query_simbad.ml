@@ -41,9 +41,13 @@ let query_simbad target =
       printf "No response from SIMBAD\n";
       None
 
+let obj_cache = Hashtbl.create 127
+
 (* Enhanced get_object_coordinates with SIMBAD lookup *)
 let get_object_coordinates name =
-  match query_simbad name with
+  if not (Hashtbl.mem obj_cache name) then
+    Hashtbl.add obj_cache name (query_simbad name);
+  match (Hashtbl.find obj_cache name) with
   | Some result ->
       printf "Found %s: RA=%.4f°, Dec=%.4f°%s\n" 
         result.identifier 

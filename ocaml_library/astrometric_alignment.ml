@@ -295,48 +295,8 @@ let calculate_stack_dimensions files =
   (output_wcs, width_px, height_px, avg_scale, !image_params)
 
 (* Stack a list of plate-solved FITS images *)
-let stack_astrometric files stacking_method output_path =
-  Printf.printf "Stacking %d images using astrometric alignment...\n" (List.length files);
-  flush stdout;
-  
-  (* Calculate the output dimensions and WCS parameters *)
-  let (output_wcs, width, height, avg_scale, image_params) = calculate_stack_dimensions files in
-  
-  (* Create an array to accumulate pixel values and weights *)
-  let stacked_data = Array.make_matrix height width [] in
-  
-  (* Process each image *)
-  List.iter (fun (file, wcs, img_width, img_height) ->
-    Printf.printf "Processing %s...\n" (Filename.basename file);
-    flush stdout;
-    
-    (* Read the image data *)
-    let _, contents = find_header_end file (read_image file) in
-    let data = read_fits_data contents img_width img_height in
-    
-    (* Align to the output WCS frame *)
-    let aligned_data = align_image_wcs data img_width img_height wcs output_wcs width height in
-    
-    (* Add to stacked data *)
-    for y = 0 to height - 1 do
-      for x = 0 to width - 1 do
-        let value = aligned_data.(y).(x) in
-        if value > 0 then
-          stacked_data.(y).(x) <- value :: stacked_data.(y).(x)
-      done
-    done;
-    
-    Printf.printf "  Added %s to stack\n" (Filename.basename file);
-    flush stdout
-  ) image_params;
-  
-  (* Apply stacking method to each pixel *)
-  let output_data = Array.make_matrix height width 0 in
-  
-  for y = 0 to height - 1 do
-    for x = 0 to width - 1 do
-      let values = Array.of_list (stacked_data.(y).(x)) in
-      
+
+let apply_stacking_method values stacking_method =
       if Array.length values > 0 then
         (* Apply stacking method *)
         let stacked_value = match stacking_method with
@@ -401,9 +361,228 @@ let stack_astrometric files stacking_method output_path =
               (* Simple implementation - all weights equal for now *)
               let sum = Array.fold_left (+) 0 values in
               sum / Array.length values
+        in        
+        stacked_value
+    else
+        0
+
+let stack_astrometric files reference_idx stacking_method output_path =
+  Printf.printf "Stacking %d images using astrometric alignment...\n" (List.length files);
+  flush stdout;
+  
+  (* Calculate the output dimensions and WCS parameters *)
+  let (output_wcs, width, height, avg_scale, image_params) = calculate_stack_dimensions files in
+  
+  (* First check if the input files are RGB (NAXIS=3) *)
+  let is_rgb = 
+    try
+      let first_hdr = Fits.just_header (List.hd files) in
+      let naxis = parse_int first_hdr "NAXIS" in
+      let naxis3 = if naxis = 3 then parse_int first_hdr "NAXIS3" else 1 in
+      naxis = 3 && naxis3 = 3
+    with _ -> false
+  in
+  
+  Printf.printf "Detected %s images\n" (if is_rgb then "RGB" else "monochrome");
+  
+  if is_rgb then begin
+    (* Handle RGB stacking *)
+    (* Create arrays for each color plane *)
+    let stacked_r = Array.make_matrix height width [] in
+    let stacked_g = Array.make_matrix height width [] in
+    let stacked_b = Array.make_matrix height width [] in
+    
+    (* Process each image *)
+    List.iter (fun (file, wcs, img_width, img_height) ->
+      Printf.printf "Processing %s...\n" (Filename.basename file);
+      flush stdout;
+      
+      (* Read the image data (all 3 planes) *)
+      let _, contents = Fits.find_header_end file (Fits.read_image file) in
+      
+      (* Calculate plane size and offsets *)
+      let plane_size = img_width * img_height * 2 in (* 16-bit = 2 bytes per pixel *)
+      
+      (* Extract and align each color plane *)
+      for plane = 0 to 2 do
+        let plane_offset = plane * plane_size in
+        
+        (* Extract the plane data *)
+        let plane_data = Array.make_matrix img_height img_width 0 in
+        for y = 0 to img_height - 1 do
+          for x = 0 to img_width - 1 do
+            let offset = plane_offset + (y * img_width + x) * 2 in
+            if offset + 1 < String.length contents then
+              plane_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
+                                  (int_of_char contents.[offset + 1])
+          done
+        done;
+        
+        (* Align this plane *)
+        let aligned_data = align_image_wcs plane_data img_width img_height wcs output_wcs width height in
+        
+        (* Add to stacked data for this plane *)
+        let stacked_plane = match plane with
+          | 0 -> stacked_r
+          | 1 -> stacked_g
+          | _ -> stacked_b
         in
         
-        output_data.(y).(x) <- stacked_value
+        for y = 0 to height - 1 do
+          for x = 0 to width - 1 do
+            stacked_plane.(y).(x) <- aligned_data.(y).(x) :: stacked_plane.(y).(x)
+          done
+        done;
+        
+        Printf.printf "  Added %s plane %d to stack\n" (Filename.basename file) plane;
+      done;
+    ) image_params;
+    
+    (* Apply stacking method to each pixel in each plane *)
+    let output_r = Array.make_matrix height width 0 in
+    let output_g = Array.make_matrix height width 0 in
+    let output_b = Array.make_matrix height width 0 in
+    
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        (* Process each color plane separately *)
+        for plane = 0 to 2 do
+          let values = match plane with
+            | 0 -> Array.of_list stacked_r.(y).(x)
+            | 1 -> Array.of_list stacked_g.(y).(x)
+            | _ -> Array.of_list stacked_b.(y).(x)
+          in
+          
+          let stacked_value = apply_stacking_method values stacking_method in
+          
+          match plane with
+            | 0 -> output_r.(y).(x) <- stacked_value
+            | 1 -> output_g.(y).(x) <- stacked_value
+            | _ -> output_b.(y).(x) <- stacked_value
+        done
+      done;
+      
+      (* Print progress for large images *)
+      if height > 1000 && y mod 100 = 0 then begin
+        Printf.printf "  Stacking progress: %.1f%%\n" (float_of_int y *. 100.0 /. float_of_int height);
+        flush stdout
+      end
+    done;
+    
+    (* Create FITS header for output file - make sure to set NAXIS=3 *)
+    let header = Hashtbl.create 50 in
+    
+    (* Get header from reference file *)
+    let ref_hdr = Fits.just_header (List.nth files reference_idx) in
+    
+    (* Copy important keywords but enforce RGB structure *)
+    List.iter (fun key ->
+      if key <> "NAXIS" && key <> "NAXIS1" && key <> "NAXIS2" && key <> "NAXIS3" then
+        match Hashtbl.find_opt ref_hdr key with
+        | Some value -> Hashtbl.add header key value
+        | None -> ()
+    ) ["SIMPLE"; "BITPIX"; "BZERO"; "BSCALE"; "DATE-OBS"; "INSTRUME"; "EXPOSURE"; "FOCAL"; "PIXSZ"; "EXTEND"];
+    
+    (* Set RGB dimensions *)
+    Hashtbl.add header "SIMPLE" " = T / FITS standard";
+    Hashtbl.add header "BITPIX" " = 16 / 16-bit signed integers";
+    Hashtbl.add header "NAXIS" " = 3 / Number of data axes";
+    Hashtbl.add header "NAXIS1" (Printf.sprintf " = %d / Width in pixels" width);
+    Hashtbl.add header "NAXIS2" (Printf.sprintf " = %d / Height in pixels" height);
+    Hashtbl.add header "NAXIS3" " = 3 / Number of color planes (RGB)";
+    Hashtbl.add header "EXTEND" " = T / Extensions may be present";
+    Hashtbl.add header "BZERO" " = 32768 / Offset to unsigned short range";
+    Hashtbl.add header "BSCALE" " = 1 / Default scaling factor";
+    
+    (* Add metadata about stacking *)
+    Hashtbl.add header "HISTORY" " Stacked with OCaml Astrometric Alignment";
+    Hashtbl.add header "HISTORY" (Printf.sprintf " Stacking method: %s" 
+      (match stacking_method with
+       | Average -> "Average"
+       | Median -> "Median"
+       | SigmaClip sigma -> Printf.sprintf "SigmaClip (%.1f)" sigma
+       | Kappa k -> Printf.sprintf "Kappa (%.1f)" k
+       | WeightedAverage -> "WeightedAverage"));
+    Hashtbl.add header "HISTORY" (Printf.sprintf " Number of frames: %d" (List.length image_params));
+    
+    (* Write the stacked RGB image *)
+    let oc = open_out_bin output_path in
+    
+    (* Write header *)
+    ignore (Fits.write_fits_header oc header);
+    
+    (* Write red plane *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        output_byte oc (output_r.(y).(x) lsr 8);
+        output_byte oc (output_r.(y).(x) land 0xFF);
+      done
+    done;
+    
+    (* Write green plane *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        output_byte oc (output_g.(y).(x) lsr 8);
+        output_byte oc (output_g.(y).(x) land 0xFF);
+      done
+    done;
+    
+    (* Write blue plane *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        output_byte oc (output_b.(y).(x) lsr 8);
+        output_byte oc (output_b.(y).(x) land 0xFF);
+      done
+    done;
+    
+    (* Pad data to multiple of 2880 bytes *)
+    let data_size = width * height * 2 * 3 in
+    let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
+    output_string oc (String.make padding_size '\000');
+    
+    close_out oc;
+    
+    Printf.printf "Stacked RGB image saved to %s\n" output_path;
+    true
+  end
+  else begin
+  
+  (* Create an array to accumulate pixel values and weights *)
+  let stacked_data = Array.make_matrix height width [] in
+  
+  (* Process each image *)
+  List.iter (fun (file, wcs, img_width, img_height) ->
+    Printf.printf "Processing %s...\n" (Filename.basename file);
+    flush stdout;
+    
+    (* Read the image data *)
+    let _, contents = find_header_end file (read_image file) in
+    let data = read_fits_data contents img_width img_height in
+    
+    (* Align to the output WCS frame *)
+    let aligned_data = align_image_wcs data img_width img_height wcs output_wcs width height in
+    
+    (* Add to stacked data *)
+    for y = 0 to height - 1 do
+      for x = 0 to width - 1 do
+        let value = aligned_data.(y).(x) in
+        if value > 0 then
+          stacked_data.(y).(x) <- value :: stacked_data.(y).(x)
+      done
+    done;
+    
+    Printf.printf "  Added %s to stack\n" (Filename.basename file);
+    flush stdout
+  ) image_params;
+  
+  (* Apply stacking method to each pixel *)
+  let output_data = Array.make_matrix height width 0 in
+
+  for y = 0 to height - 1 do
+    for x = 0 to width - 1 do
+      let values = Array.of_list (stacked_data.(y).(x)) in
+      let stacked_value = apply_stacking_method values stacking_method in             
+      output_data.(y).(x) <- stacked_value
     done;
     
     (* Print progress for large images *)
@@ -481,6 +660,7 @@ let stack_astrometric files stacking_method output_path =
   flush stdout;
   
   true
+  end
 
 (* Standalone tool for stacking astrometric images *)
 let astrometric_stack_cli args =
@@ -560,5 +740,5 @@ let astrometric_stack_cli args =
 
     (* Perform stacking *)
     print_memory_usage "Before aligned_data creation";
-    stack_astrometric input_files method_type !output_file
+    stack_astrometric input_files 0 method_type !output_file
   end

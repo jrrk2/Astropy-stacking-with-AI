@@ -17,10 +17,20 @@ all:
 
 calibrate: 
 	-@rm -rf calibrated
-	_build/default/dark_stack.exe -dark ../../dark_temps/temp_285 -light /Volumes/X10Pro/stellina-5df04c/2025-02-17_20-42-14_observation_M42/02-images-initial
+	env OCAMLRUNPARAM=b _build/default/dark_stack.exe -dark ../../dark_temps/temp_285 -light /Volumes/X10Pro/stellina-5df04c/2025-02-17_20-42-14_observation_M42/02-images-initial
+
+model:
+	env OCAMLRUNPARAM=b _build/default/altaz_radec_model.exe -lat 52.244020 -long 0.078841 -json /Volumes/X10Pro/stellina-5df04c/2025-02-17_20-42-14_observation_M42 /Volumes/X10Pro/stellina-5df04c/2025-02-17_20-42-14_observation_M42/02-images-initial/img-000?r.fits
+
+integrate:
+	-@rm -rf lights
+	env OCAMLRUNPARAM=b _build/default/stellina_integration.exe --calibrate --darks-dir ../../dark_temps --lat 52.244020 --lon 0.078841 --target M42 /Volumes/X10Pro/stellina-5df04c/2025-02-17_20-42-14_observation_M42/02-images-initial
 
 stack1:
 	env OCAMLRUNPARAM=b _build/default/stack_calibrated.exe -input calibrated
+
+stack2:
+	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -o stacked.fits solved/cal_img-*_rgb.fits
 
 shar:
 	(cd _build/default && shar `ls -1 *.ml *.mli | fgrep -v .pp.` > ../../archive.shar.txt)
