@@ -21,32 +21,38 @@ type solve_options = {
   scale_high: float;      (* Upper bound of image scale estimate in arcsec/pixel *)
   scale_units: string;    (* Units for scale (usually "arcsecperpix") *)
   downsample: int;        (* Downsample factor - speeds up solving for large images *)
-  timeout: int;           (* Maximum time to spend on solving in seconds *)
+  cpulimit: int;          (* Maximum time to spend on solving in seconds *)
   no_plots: bool;         (* Skip generating plots *)
   no_verify: bool;        (* Skip verification step *)
   overwrite: bool;        (* Overwrite existing output files *)
   use_sextractor: bool;   (* Use SExtractor for star extraction *)
-  cpulimit: int option;   (* Limit CPU time in seconds *)
   odds_ratio: float;      (* Odds ratio threshold for solution *)
   depth: string option;   (* Depth of search (1-30, or specific list like "10,20,30") *)
   extension: string;      (* Extension for generated files *)
+  verbose: bool;          (* Verbose file reporting *)
+  radius: float;          (* search radius *)
+  mutable mount_ra: float;        (* Estimated RA from telescope pointing *)
+  mutable mount_dec: float;       (* Estimated DEC from telescope pointing *)
 }
 
-(* Default options for Stellina images - 0.57 arcsec/pixel plate scale *)
+(* Default options for Stellina images *)
 let default_options = {
-  scale_low = 1.1;            (* ~10% lower than nominal Stellina scale *)
-  scale_high = 2.6;           (* ~10% higher than nominal Stellina scale *)
+  scale_low = 1.1;            (* Lower bound for Stellina RGB images (original ~1.2 arcsec/px) *)
+  scale_high = 2.6;           (* Upper bound for Stellina RGB images (doubled to ~2.4 arcsec/px) *)
   scale_units = "arcsecperpix";
-  downsample = 2;              (* Speeds up solving, Stellina images are large enough *)
-  timeout = 30;                (* 30 second timeout *)
+  downsample = 1;              (* No downsampling needed for RGB images (already 2x from debayering) *)
+  cpulimit = 30;               (* 30 second cpulimit *)
   no_plots = true;             (* Skip generating plots to save time *)
   no_verify = false;           (* Keep verification step *)
   overwrite = true;            (* Overwrite existing output files *)
   use_sextractor = false;      (* SExtractor not needed for Stellina images *)
-  cpulimit = Some 25;          (* Limit CPU time to 25 seconds *)
   odds_ratio = 1e9;            (* Higher odds ratio for more confidence *)
   depth = Some "10,20,30,40";  (* Progressive depths to try *)
   extension = "solved";        (* Extension for generated files *)
+  verbose = false;             (* not verbose *)
+  radius = 1.0;                (* search radius *)
+  mount_ra = 0.0;              (* placeholders *)
+  mount_dec = 0.0;
 }
 
 (* Build solve-field command with given options *)
@@ -54,16 +60,28 @@ let build_solve_command options filename output_dir =
   let base_name = Filename.basename filename |> Filename.remove_extension in
   let output_path = Filename.concat output_dir base_name in
   
+  (* Check if this is an RGB file - if so, don't downsample *)
+  let is_rgb = 
+    try
+      let hdrh = Fits.just_header filename in
+      let naxis = parse_int hdrh "NAXIS" in
+      naxis = 3  (* RGB files have NAXIS=3 *)
+    with _ -> false  (* Default to false if we can't determine *)
+  in
+  
+  let effective_downsample = if is_rgb then 1 else options.downsample in
+  
   let cmd_parts = [
     "solve-field";
+    sprintf "--ra %.4f" options.mount_ra;
+    sprintf "--dec %.4f" options.mount_dec;
+    sprintf "--radius %.4f" options.radius;
     sprintf "--scale-low %.2f" options.scale_low;
     sprintf "--scale-high %.2f" options.scale_high;
     sprintf "--scale-units %s" options.scale_units;
-    sprintf "--downsample %d" options.downsample;
+    sprintf "--downsample %d" effective_downsample;
     sprintf "--odds-to-solve %.1e" options.odds_ratio;
-    sprintf "--cpulimit %d" options.timeout;
     sprintf "--dir %s" output_dir;
-(*    sprintf "--basename %s" base_name; *)
   ] in
   
   let cmd_parts = cmd_parts @ [
@@ -74,9 +92,6 @@ let build_solve_command options filename output_dir =
   ] in
   
   let cmd_parts = cmd_parts @ [
-    (match options.cpulimit with
-    | Some limit -> sprintf "--cpulimit %d" limit
-    | None -> "");
     
     (match options.depth with
     | Some depth -> sprintf "--depth %s" depth
@@ -96,14 +111,13 @@ let solve_field options filename output_dir =
   
   (* Read mount coordinates from FITS header *)
   let hdrh = just_header filename in
-  let mount_ra = 
-    try parse_float hdrh "MOUNTRA" 
-    with _ -> parse_float hdrh "OBJCTRA" 
-  in
-  let mount_dec = 
-    try parse_float hdrh "MOUNTDEC=" 
-    with _ -> parse_float hdrh "OBJCTDEC" 
-  in
+  options.mount_ra <-
+    (try parse_float hdrh "MOUNTRA" 
+    with _ -> parse_float hdrh "OBJCTRA");
+
+  options.mount_dec <-
+    (try parse_float hdrh "MOUNTDEC=" 
+    with _ -> parse_float hdrh "OBJCTDEC"); 
   
   (* Build and execute solve-field command *)
   let command = build_solve_command options filename output_dir in
@@ -116,20 +130,22 @@ let solve_field options filename output_dir =
   
   printf "solve-field finished with exit code %d in %.1f seconds\n" exit_code solve_time;
   
-  (* After solve-field command *)
+  (* Check if solving was successful *)
+  let base_name = Filename.basename filename |> Filename.remove_extension in
+  let wcs_file = Filename.concat output_dir (base_name ^ ".wcs") in
+  let solved_flag = Filename.concat output_dir (base_name ^ ".solved") in
+  
+  (* Add diagnostic output of files in the directory *)
+  if options.verbose then (
   printf "Checking for output files in: %s\n" output_dir;
   let dir_contents = Sys.readdir output_dir |> Array.to_list in
   List.iter (fun file -> 
     printf "  Found: %s\n" file
-  ) dir_contents;
-
-  (* Check if solving was successful *)
-  let base_name = Filename.basename filename |> Filename.remove_extension in
-  let wcs_file = Filename.concat output_dir (base_name ^ ".wcs") in
+  ) dir_contents);
   
-  if exit_code = 0 && Sys.file_exists wcs_file then
-    (* Solving succeeded - read solved coordinates from WCS file *)
-    let solved_fits = Filename.concat output_dir (base_name ^ "." ^ options.extension ^ ".fits") in
+  if exit_code = 0 && (Sys.file_exists wcs_file || Sys.file_exists solved_flag) then
+    (* Solving succeeded - read solved coordinates from solved FITS file *)
+    let solved_fits = Filename.concat output_dir (base_name ^ ".fits") in
     
     if Sys.file_exists solved_fits then
       try
@@ -138,19 +154,19 @@ let solve_field options filename output_dir =
         let solved_dec = parse_float solved_hdrh "CRVAL2" in
         
         (* Calculate difference *)
-        let ra_error = solved_ra -. mount_ra in
-        let dec_error = solved_dec -. mount_dec in
+        let ra_error = solved_ra -. options.mount_ra in
+        let dec_error = solved_dec -. options.mount_dec in
         let total_error = sqrt (ra_error *. ra_error +. dec_error *. dec_error) in
         
         printf "SUCCESS: RA=%.4f° (mount=%.4f°, error=%.4f°), Dec=%.4f° (mount=%.4f°, error=%.4f°)\n" 
-          solved_ra mount_ra ra_error solved_dec mount_dec dec_error;
+          solved_ra options.mount_ra ra_error solved_dec options.mount_dec dec_error;
         printf "Total error: %.4f°\n" total_error;
         
         {
           success = true;
           filename = Filename.basename filename;
-          mount_ra;
-          mount_dec;
+          mount_ra = options.mount_ra;
+          mount_dec = options.mount_dec;
           solved_ra = Some solved_ra;
           solved_dec = Some solved_dec;
           ra_error = Some ra_error;
@@ -163,8 +179,8 @@ let solve_field options filename output_dir =
         {
           success = false;
           filename = Filename.basename filename;
-          mount_ra;
-          mount_dec;
+          mount_ra = options.mount_ra;
+          mount_dec = options.mount_dec;
           solved_ra = None;
           solved_dec = None;
           ra_error = None;
@@ -177,8 +193,8 @@ let solve_field options filename output_dir =
       {
         success = false;
         filename = Filename.basename filename;
-        mount_ra;
-        mount_dec;
+        mount_ra = options.mount_ra;
+        mount_dec = options.mount_dec;
         solved_ra = None;
         solved_dec = None;
         ra_error = None;
@@ -191,8 +207,8 @@ let solve_field options filename output_dir =
     {
       success = false;
       filename = Filename.basename filename;
-      mount_ra;
-      mount_dec;
+      mount_ra = options.mount_ra;
+      mount_dec = options.mount_dec;
       solved_ra = None;
       solved_dec = None;
       ra_error = None;
@@ -341,19 +357,19 @@ let main () =
   let output_dir = ref "solved_verification" in
   let scale_low = ref default_options.scale_low in
   let scale_high = ref default_options.scale_high in
-  let timeout = ref default_options.timeout in
   let use_all_files = ref false in
-  
+  let cpulimit = ref 30 in
+
   let specs = [
     ("-i", Arg.Set_string input_dir, "Input directory containing FITS files");
     ("-o", Arg.Set_string output_dir, "Output directory for solving results");
     ("-scale-low", Arg.Set_float scale_low, "Lower bound of image scale (arcsec/pixel)");
     ("-scale-high", Arg.Set_float scale_high, "Upper bound of image scale (arcsec/pixel)");
-    ("-timeout", Arg.Set_int timeout, "Timeout in seconds for each solve");
+    ("-cpulimit", Arg.Set_int cpulimit, "CPU limit in seconds for each solve");
     ("-all", Arg.Set use_all_files, "Process all FITS files (not just those with MOUNTRA/DEC)");
   ] in
   
-  let usage = "Usage: verify_plate_solving -i input_dir [-o output_dir] [-scale-low val] [-scale-high val] [-timeout sec] [-all]" in
+  let usage = "Usage: verify_plate_solving -i input_dir [-o output_dir] [-scale-low val] [-scale-high val] [-cpulimit sec] [-all]" in
   
   Arg.parse specs (fun _ -> ()) usage;
   
@@ -417,7 +433,7 @@ let main () =
   let options = { default_options with
     scale_low = !scale_low;
     scale_high = !scale_high;
-    timeout = !timeout;
+    cpulimit = !cpulimit;
   } in
   
   (* Process files *)

@@ -60,7 +60,7 @@ let radec_to_altaz context ra dec =
   
   Altaz.raDectoAltAz ra dec context.latitude context.longitude lst
 
-(* Convert Alt/Az to RA/Dec using the context *)
+(* Convert Alt/Az to RA/Dec J2000 using the context *)
 let altaz_to_radec context alt az =
   let timestamp = match context.timestamp with
     | None -> Unix.gettimeofday()
@@ -79,7 +79,13 @@ let altaz_to_radec context alt az =
           float_of_int(hour*3600+minute*60+second) /. 86400.0 in
   let lst = Altaz.local_siderial_time' context.longitude (jd -. Altaz.jd_2000) in
   
-  AltazToRadec.altAztoRaDec alt az context.latitude context.longitude lst
+  let ra_now, dec_now, ha_now = AltazToRadec.altAztoRaDec alt az context.latitude context.longitude lst in
+
+  (* Calculate time offset in Julian centuries *)
+  let _T = (jd -. Altaz.jd_2000) /. 36525.0 in
+  let ra2000, dec2000 = AltazToRadec.jnow_to_j2000 _T ra_now dec_now in
+  
+  ra2000, dec2000, ha_now
 
 (* Load a pointing model with option to convert from altaz model *)
 let load_pointing_model filename =

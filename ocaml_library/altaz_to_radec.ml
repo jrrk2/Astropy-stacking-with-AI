@@ -58,8 +58,21 @@ let altAztoRaDec _Alt _Az _Lat _Long _LST =
   (* Return RA, Dec, and hour angle *)
   ra_deg, dec, ha_hours
 
+(* ra/dec now to J2000 *)
+let jnow_to_j2000 _T ra_now dec_now =
+  (* Calculate correction factors *)
+  let _M = 1.2812323 *. _T +. 0.0003879 *. _T *. _T +. 0.0000101 *. _T *. _T *. _T in
+  let _N = 0.5567530 *. _T -. 0.0001185 *. _T *. _T +. 0.0000116 *. _T *. _T *. _T in
+  
+  (* Apply the inverse correction to get J2000 coordinates *)
+  let delta_ra = _M +. _N *. sin (ra_now *. (Float.pi /. 180.)) *. tan (dec_now *. (Float.pi /. 180.)) in
+  let delta_dec = _N *. cos (ra_now *. (Float.pi /. 180.)) in
+  let ra2000 = ra_now -. delta_ra in
+  let dec2000 = dec_now -. delta_dec in  
+  ra2000, dec2000
+
 (* Function to convert from Alt/Az to J2000 coordinates *)
-let altaz_to_j2000 alt az latitude longitude =
+let altaz_to_j2000_now alt az latitude longitude =
   (* Get current time *)
   let tm = Unix.gmtime (Unix.gettimeofday ()) in
   let yr = tm.tm_year + 1900 in
@@ -82,16 +95,7 @@ let altaz_to_j2000 alt az latitude longitude =
   let date = Unix.gettimeofday() in
   let datum,_ = Unix.mktime {tm_sec=0; tm_min=0; tm_hour=12; tm_mday=1; tm_mon=0; tm_year = 100; tm_wday=0; tm_yday=0; tm_isdst=false} in
   let _T = (date -. datum) /. 86400.0 /. 36525.0 in
-  let _M = 1.2812323 *. _T +. 0.0003879 *. _T *. _T +. 0.0000101 *. _T *. _T *. _T in
-  let _N = 0.5567530 *. _T -. 0.0001185 *. _T *. _T +. 0.0000116 *. _T *. _T *. _T in
-  
-  (* Apply the inverse correction to get J2000 coordinates *)
-  let delta_ra = _M +. _N *. sin (ra_now *. (Float.pi /. 180.)) *. tan (dec_now *. (Float.pi /. 180.)) in
-  let delta_dec = _N *. cos (ra_now *. (Float.pi /. 180.)) in
-  let ra2000 = ra_now -. delta_ra in
-  let dec2000 = dec_now -. delta_dec in
-  
-  ra2000, dec2000
+  jnow_to_j2000 _T ra_now dec_now
 
 (* Main function to calculate Alt/Az from J2000 coordinates at specified time *)
 let altaz_to_j2000_time yr mon dy hr min sec alt az latitude longitude =
@@ -106,16 +110,7 @@ let altaz_to_j2000_time yr mon dy hr min sec alt az latitude longitude =
   
   (* Calculate time offset in Julian centuries *)
   let _T = (jd_calc -. jd_2000) /. 36525.0 in
-  
-  (* Calculate correction factors *)
-  let _M = 1.2812323 *. _T +. 0.0003879 *. _T *. _T +. 0.0000101 *. _T *. _T *. _T in
-  let _N = 0.5567530 *. _T -. 0.0001185 *. _T *. _T +. 0.0000116 *. _T *. _T *. _T in
-  
-  (* Apply the inverse correction to get J2000 coordinates *)
-  let delta_ra = _M +. _N *. sin (ra_now *. (Float.pi /. 180.)) *. tan (dec_now *. (Float.pi /. 180.)) in
-  let delta_dec = _N *. cos (ra_now *. (Float.pi /. 180.)) in
-  let ra2000 = ra_now -. delta_ra in
-  let dec2000 = dec_now -. delta_dec in
+  let ra2000, dec2000 = jnow_to_j2000 _T ra_now dec_now in
   
   jd_calc, ra2000, dec2000, ra_now, dec_now, lst, ha_now
 
