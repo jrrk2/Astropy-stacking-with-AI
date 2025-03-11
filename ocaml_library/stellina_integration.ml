@@ -32,7 +32,7 @@ type stellina_process_flags = {
 }
 
 (* Cache for master darks to avoid rebuilding *)
-let master_dark_cache = Hashtbl.create 10
+let (master_dark_cache:(int,int array array * (string, string) Hashtbl.t)Hashtbl.t) = Hashtbl.create 10
 
 (* Default processing flags *)
 let default_process_flags = {
@@ -247,40 +247,50 @@ let get_master_dark bin_temp bin_path =
     let existing_master = 
       try 
         let files = Sys.readdir bin_path in
-        let master_file = Array.find (fun f -> 
-          String.lowercase_ascii f = "master_dark.fits" || 
-          Filename.check_suffix f ".fits" && 
-          (String.lowercase_ascii (Filename.basename f) |> 
-           String.split_on_char '_' |> List.exists ((=) "master"))
-        ) files in
+        let master_file = ref None in
         
-        let master_path = Filename.concat bin_path master_file in
-        printf "  Found existing master dark: %s\n" master_file;
+        (* Look for master dark files *)
+        for i = 0 to Array.length files - 1 do
+          let f = files.(i) in
+          if String.lowercase_ascii f = "master_dark.fits" || 
+             (Filename.check_suffix f ".fits" && 
+              (String.lowercase_ascii (Filename.basename f) |> 
+               String.split_on_char '_' |> List.exists ((=) "master"))) then
+            master_file := Some f
+        done;
         
-        (* Verify it's a valid master dark by checking for NFRAMES keyword *)
-        let hdrh = just_header master_path in
-        let nframes = 
-          try
-            let nframes_str = Hashtbl.find hdrh "NFRAMES=" in
-            try Scanf.sscanf nframes_str " = %d" (fun i -> i) 
-            with _ -> 1
-          with Not_found -> 
-            try
-              (* Try DARKAVG as alternative for number of frames *)
-              let nframes_str = Hashtbl.find hdrh "DARKAVG=" in
-              try Scanf.sscanf nframes_str " = %d" (fun i -> i)
-              with _ -> 1
-            with Not_found -> 1
-        in
-        
-        if nframes > 0 then begin
-          printf "  Using existing master dark with %d frames\n" nframes;
-          Some master_path
-        end else begin
-          printf "  Existing master dark doesn't have valid NFRAMES, will create new one\n";
-          None
-        end
-      with Not_found -> 
+        match !master_file with
+        | Some file ->
+            let master_path = Filename.concat bin_path file in
+            printf "  Found existing master dark: %s\n" file;
+            
+            (* Verify it's a valid master dark by checking for NFRAMES keyword *)
+            let hdrh = just_header master_path in
+            let nframes = 
+              try
+                let nframes_str = Hashtbl.find hdrh "NFRAMES=" in
+                try Scanf.sscanf nframes_str " = %d" (fun i -> i) 
+                with _ -> 1
+              with Not_found -> 
+                try
+                  (* Try DARKAVG as alternative for number of frames *)
+                  let nframes_str = Hashtbl.find hdrh "DARKAVG=" in
+                  try Scanf.sscanf nframes_str " = %d" (fun i -> i)
+                  with _ -> 1
+                with Not_found -> 1
+            in
+            
+            if nframes > 0 then begin
+              printf "  Using existing master dark with %d frames\n" nframes;
+              Some master_path
+            end else begin
+              printf "  Existing master dark doesn't have valid NFRAMES, will create new one\n";
+              None
+            end
+        | None -> 
+            printf "  No existing master dark found in %s\n" bin_path;
+            None
+      with _ -> 
         printf "  No existing master dark found in %s\n" bin_path;
         None
     in
@@ -288,7 +298,7 @@ let get_master_dark bin_temp bin_path =
     match existing_master with
     | Some master_path ->
         (* Load the existing master dark *)
-        try
+        (try
           let img = read_image master_path in
           let hdrh, contents = find_header_end master_path img in
           let width = parse_int hdrh "NAXIS1" in
@@ -324,7 +334,7 @@ let get_master_dark bin_temp bin_path =
           Some result
         with e ->
           printf "  Error loading existing master dark: %s\n" (Printexc.to_string e);
-          None
+          None)
     | None ->
         (* Create dark group for this bin *)
         let dark_files = Dark_calibration.find_fits_files bin_path in

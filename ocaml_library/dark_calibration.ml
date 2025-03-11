@@ -116,7 +116,7 @@ let create_and_use_master_dark group =
   printf "  Dark frame dimensions: %dx%d\n" width height;
   
   (* Initialize accumulation array using floating point *)
-  let master_dark = Array.make_matrix height width 0.0 in
+  let master_dark = Array.make_matrix height width 0 in
   
   (* Process each dark frame *)
   Array.iter (fun file ->
@@ -130,7 +130,7 @@ let create_and_use_master_dark group =
       (* Add to accumulation, converting to float *)
       for y = 0 to height - 1 do
         for x = 0 to width - 1 do
-          master_dark.(y).(x) <- master_dark.(y).(x) +. float_of_int data.(y).(x)
+          master_dark.(y).(x) <- master_dark.(y).(x) + data.(y).(x)
         done
       done
     with e ->
@@ -138,12 +138,12 @@ let create_and_use_master_dark group =
   ) group.files;
   
   (* Calculate average *)
-  let count = float_of_int (Array.length group.files) in
+  let count = Array.length group.files in
   
   (* For each pixel, divide by count to get average *)
   for y = 0 to height - 1 do
     for x = 0 to width - 1 do
-      master_dark.(y).(x) <- master_dark.(y).(x) /. count
+      master_dark.(y).(x) <- master_dark.(y).(x) / count
     done
   done;
   
@@ -195,9 +195,9 @@ let calibrate_image_in_memory image_path (master_dark, dark_hdrh) output_path =
       (* Get dark value, applying rotation if needed *)
       let dark_value = 
         if need_rotation then
-          int_of_float master_dark.(height - 1 - y).(width - 1 - x)
+          master_dark.(height - 1 - y).(width - 1 - x)
         else
-          int_of_float master_dark.(y).(x)
+          master_dark.(y).(x)
       in
       
       (* Subtract dark value, ensuring we don't go below zero *)
