@@ -19,9 +19,9 @@
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils astro_noise_analysis dark_temp_analysis dark_calibration debayer_integration dark_stack))
  
 (executable
-  (name plate_solve_verification)
+  (name plate_solve_cli)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
-  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils astro_noise_analysis dark_temp_analysis dark_calibration debayer_integration plate_solve_verification))
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils astro_noise_analysis dark_temp_analysis dark_calibration debayer_integration plate_solve_verification parallel_plate_solve plate_solve_cli))
  
 (executable
   (name integration_examples)

@@ -8,4 +8,5 @@ _build/
 norm/
 calibrated/
 tempdir/
+solved_verification/
 archive.shar.txt
