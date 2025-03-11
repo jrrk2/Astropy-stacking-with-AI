@@ -116,6 +116,13 @@ let solve_field options filename output_dir =
   
   printf "solve-field finished with exit code %d in %.1f seconds\n" exit_code solve_time;
   
+  (* After solve-field command *)
+  printf "Checking for output files in: %s\n" output_dir;
+  let dir_contents = Sys.readdir output_dir |> Array.to_list in
+  List.iter (fun file -> 
+    printf "  Found: %s\n" file
+  ) dir_contents;
+
   (* Check if solving was successful *)
   let base_name = Filename.basename filename |> Filename.remove_extension in
   let wcs_file = Filename.concat output_dir (base_name ^ ".wcs") in
