@@ -1,5 +1,7 @@
-(* plate_solve_cli.ml - Command-line interface for parallel plate solving *)
+(* plate_solve_cli.ml - Command-line interface with direct process-based parallelization *)
 
+open Types
+open Fits
 open Plate_solve_verification
 
 (* Main function for command-line operation *)
@@ -61,14 +63,14 @@ let main () =
     else
       List.filter (fun file ->
         try
-          let hdrh = Fits.just_header file in
+          let hdrh = just_header file in
           let _ = 
-            try Types.parse_float hdrh "MOUNTRA" 
-            with _ -> Types.parse_float hdrh "OBJCTRA" 
+            try parse_float hdrh "MOUNTRA" 
+            with _ -> parse_float hdrh "OBJCTRA" 
           in
           let _ = 
-            try Types.parse_float hdrh "MOUNTDEC=" 
-            with _ -> Types.parse_float hdrh "OBJCTDEC" 
+            try parse_float hdrh "MOUNTDEC=" 
+            with _ -> parse_float hdrh "OBJCTDEC" 
           in
           true
         with _ -> false
@@ -90,9 +92,9 @@ let main () =
     cpulimit = !cpulimit;
   } in
   
-  (* Process files *)
+  (* Process files using direct process management for true parallelism *)
   let (success_count, total_count, avg_error) = 
-    verify_fits_batch ~worker_count:!workers files_to_process !output_dir options 
+    verify_fits_batch_with_processes ~worker_count:!workers files_to_process !output_dir options 
   in
   
   Printf.printf "\nVerification complete\n";
