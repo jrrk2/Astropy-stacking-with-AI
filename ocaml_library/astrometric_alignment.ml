@@ -207,25 +207,31 @@ let calculate_stack_dimensions files =
   let dec_min = ref 90.0 in
   let dec_max = ref (-90.0) in
   
-  (* First check if any images cross the 0/360 boundary *)
-  let crosses_boundary = ref false in
+(* Simple approach: check for large gaps in RA values *)
+  let all_ras = ref [] in
   List.iter (fun (_, _, _, _, corners) ->
-    for i = 0 to List.length corners - 1 do
-      for j = i + 1 to List.length corners - 1 do
-        let (ra1, _) = List.nth corners i in
-        let (ra2, _) = List.nth corners j in
-        if abs_float (ra1 -. ra2) > 180.0 then
-          crosses_boundary := true
-      done
-    done
+    List.iter (fun (ra, _) -> all_ras := ra :: !all_ras) corners
   ) corners;
+  
+  let sorted_ras = List.sort compare !all_ras in
+  let crosses_boundary = 
+    if List.length sorted_ras > 1 then
+      let first_ra = List.hd sorted_ras in
+      let last_ra = List.hd (List.rev sorted_ras) in
+      (* If the range is large but not close to 360, it might cross the boundary *)
+      (last_ra -. first_ra > 180.0) && (last_ra -. first_ra < 350.0)
+    else false
+  in
+  
+  Printf.printf "RA range: %.2f to %.2f, crosses_boundary: %b\n" 
+    (List.hd sorted_ras) (List.hd (List.rev sorted_ras)) crosses_boundary;
   
   (* Now process all corners *)
   List.iter (fun (_, _, _, _, corners) ->
     List.iter (fun (ra, dec) ->
       (* Handle RA wrap around at 0/360 degrees *)
       let ra_norm = 
-        if !crosses_boundary && ra < 180.0 then
+        if crosses_boundary && ra < 180.0 then
           ra +. 360.0
         else
           ra
@@ -238,6 +244,8 @@ let calculate_stack_dimensions files =
     ) corners
   ) corners;
   
+  Printf.printf "Calculated bounds: RA=[%.2f, %.2f], Dec=[%.2f, %.2f]\n" 
+    !ra_min !ra_max !dec_min !dec_max;  
   (* Normalize RA back to 0-360 range *)
   let ra_min = if !ra_min >= 360.0 then !ra_min -. 360.0 else !ra_min in
   let ra_max = if !ra_max >= 360.0 then !ra_max -. 360.0 else !ra_max in
