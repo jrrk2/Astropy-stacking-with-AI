@@ -32,7 +32,7 @@ type stellina_process_flags = {
 }
 
 (* Cache for master darks to avoid rebuilding *)
-let (master_dark_cache:(int,'a)Hashtbl.t) = Hashtbl.create 10
+let master_dark_cache = Hashtbl.create 10
 
 (* Default processing flags *)
 let default_process_flags = {
@@ -243,26 +243,142 @@ let get_master_dark bin_temp bin_path =
     printf "  Using cached master dark for bin %d\n" bin_temp;
     Some (Hashtbl.find master_dark_cache bin_temp)
   end else begin
-    (* Create dark group for this bin *)
-    let dark_files = Dark_calibration.find_fits_files bin_path in
-    if Array.length dark_files = 0 then
-      None
-    else begin
-      let bin_temp_c = float_of_int bin_temp -. 273.15 in
-      let dark_group = {
-        Dark_calibration.temp_bin = bin_temp;
-        temperature = bin_temp_c;
-        files = dark_files;
-        master_path = None;
-      } in
-      
-      printf "  Creating master dark for bin %d (%.1f°C) from %d frames...\n" 
-        bin_temp bin_temp_c (Array.length dark_files);
-      
-      let master_dark = Dark_calibration.create_and_use_master_dark dark_group in
-      Hashtbl.add master_dark_cache bin_temp master_dark;
-      Some master_dark
-    end
+    (* First check if a master dark already exists in the bin directory *)
+    let existing_master = 
+      try 
+        let files = Sys.readdir bin_path in
+        let master_file = Array.find (fun f -> 
+          String.lowercase_ascii f = "master_dark.fits" || 
+          Filename.check_suffix f ".fits" && 
+          (String.lowercase_ascii (Filename.basename f) |> 
+           String.split_on_char '_' |> List.exists ((=) "master"))
+        ) files in
+        
+        let master_path = Filename.concat bin_path master_file in
+        printf "  Found existing master dark: %s\n" master_file;
+        
+        (* Verify it's a valid master dark by checking for NFRAMES keyword *)
+        let hdrh = just_header master_path in
+        let nframes = 
+          try
+            let nframes_str = Hashtbl.find hdrh "NFRAMES=" in
+            try Scanf.sscanf nframes_str " = %d" (fun i -> i) 
+            with _ -> 1
+          with Not_found -> 
+            try
+              (* Try DARKAVG as alternative for number of frames *)
+              let nframes_str = Hashtbl.find hdrh "DARKAVG=" in
+              try Scanf.sscanf nframes_str " = %d" (fun i -> i)
+              with _ -> 1
+            with Not_found -> 1
+        in
+        
+        if nframes > 0 then begin
+          printf "  Using existing master dark with %d frames\n" nframes;
+          Some master_path
+        end else begin
+          printf "  Existing master dark doesn't have valid NFRAMES, will create new one\n";
+          None
+        end
+      with Not_found -> 
+        printf "  No existing master dark found in %s\n" bin_path;
+        None
+    in
+    
+    match existing_master with
+    | Some master_path ->
+        (* Load the existing master dark *)
+        try
+          let img = read_image master_path in
+          let hdrh, contents = find_header_end master_path img in
+          let width = parse_int hdrh "NAXIS1" in
+          let height = parse_int hdrh "NAXIS2" in
+          let bitpix = parse_int hdrh "BITPIX" in
+          
+          printf "  Loading existing master dark (%dx%d, BITPIX=%d)\n" width height bitpix;
+          
+          (* Read data based on BITPIX type *)
+          let master_data = 
+            if bitpix = -32 then begin
+              (* It's a 32-bit float master dark *)
+              printf "  Reading 32-bit float master dark\n";
+              let float_data = read_fits_float_data contents width height in
+              
+              (* Convert to integer array to match format needed for calibration *)
+              let int_data = Array.make_matrix height width 0 in
+              for y = 0 to height - 1 do
+                for x = 0 to width - 1 do
+                  int_data.(y).(x) <- int_of_float (Float.round float_data.(y).(x))
+                done
+              done;
+              int_data
+            end else begin
+              (* Standard integer data *)
+              printf "  Reading 16-bit integer master dark\n";
+              read_fits_data contents width height
+            end
+          in
+          
+          let result = (master_data, hdrh) in
+          Hashtbl.add master_dark_cache bin_temp result;
+          Some result
+        with e ->
+          printf "  Error loading existing master dark: %s\n" (Printexc.to_string e);
+          None
+    | None ->
+        (* Create dark group for this bin *)
+        let dark_files = Dark_calibration.find_fits_files bin_path in
+        if Array.length dark_files = 0 then
+          None
+        else begin
+          let bin_temp_c = float_of_int bin_temp -. 273.15 in
+          let dark_group = {
+            Dark_calibration.temp_bin = bin_temp;
+            temperature = bin_temp_c;
+            files = dark_files;
+            master_path = None;
+          } in
+          
+          printf "  Creating new master dark for bin %d (%.1f°C) from %d frames...\n" 
+            bin_temp bin_temp_c (Array.length dark_files);
+          
+          let master_dark = Dark_calibration.create_and_use_master_dark dark_group in
+          
+          (* Save the master dark to file *)
+          let master_path = Filename.concat bin_path "master_dark.fits" in
+          printf "  Saving new master dark to %s\n" master_path;
+          
+          (* Create master dark with NFRAMES keyword *)
+          let (data, hdrh) = master_dark in
+          
+          (* Create a copy of the header with added NFRAMES *)
+          let new_hdrh = Hashtbl.copy hdrh in
+          Hashtbl.add new_hdrh "NFRAMES" (sprintf " = %d / Number of frames in master dark" (Array.length dark_files));
+          
+          (* Save the master dark *)
+          let oc = open_out_bin master_path in
+          ignore (write_fits_header oc new_hdrh);
+          
+          (* Write data *)
+          for y = 0 to Array.length data - 1 do
+            for x = 0 to Array.length data.(0) - 1 do
+              (* FITS uses big-endian *)
+              let value = data.(y).(x) in
+              output_byte oc (value lsr 8);
+              output_byte oc (value land 0xFF);
+            done
+          done;
+          
+          (* Pad data to multiple of 2880 bytes *)
+          let data_size = (Array.length data) * (Array.length data.(0)) * 2 in
+          let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
+          output_string oc (String.make padding_size '\000');
+          
+          close_out oc;
+          
+          Hashtbl.add master_dark_cache bin_temp master_dark;
+          Some master_dark
+        end
   end
 
 (* Function to find appropriate temperature bin *)
@@ -601,7 +717,7 @@ let process_directory src_dir flags =
                               if apply_dark_calibration dark_dir new_path calibrated_path then begin
                                 printf "  Successfully calibrated image\n";
                                 calibrated := !calibrated + 1;
-			        flush stdout;
+				flush stdout
                               end
                           | None ->
                               printf "  Error determining calibrated output path\n")
