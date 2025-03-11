@@ -240,13 +240,22 @@ let apply_dark_calibration darks_dir light_file output_file =
     (* Get temperature from light frame *)
     let hdrh = just_header light_file in
     let temp = get_temperature hdrh in
+    let temp_k = int_of_float (floor (temp +. 273.15 +. 0.5)) in
     
-    printf "  Processing %s (Temperature: %.1f°C)\n" 
-      (Filename.basename light_file) temp;
+    printf "  Processing %s (Temperature: %.1f°C, bin temp_%d)\n" 
+      (Filename.basename light_file) temp temp_k;
+    
+    (* Look for matching temperature directory *)
+    let temp_dir = sprintf "temp_%d" temp_k in
+    let temp_path = Filename.concat darks_dir temp_dir in
     
     (* Create calibration options *)
     let options = {
-      Dark_calibration.dark_dir = darks_dir;
+      Dark_calibration.dark_dir = 
+        if Sys.file_exists temp_path && Sys.is_directory temp_path then
+          temp_path  (* Use the matching temperature directory *)
+        else
+          darks_dir; (* Use the base directory as fallback *)
       light_dir = Filename.dirname light_file;
       output_dir = Filename.dirname output_file;
       temp_tolerance = 2.0;
@@ -258,12 +267,50 @@ let apply_dark_calibration darks_dir light_file output_file =
     
     (* Create a specialized processor for a single file *)
     let process_single_file () =
-      (* Find and group dark frames *)
-      printf "  Scanning dark frames from %s...\n" options.dark_dir;
-      let dark_files = Dark_calibration.find_fits_files options.dark_dir in
+      (* Find dark frames - first check temperature bin directory *)
+      let dark_files = 
+        if Sys.file_exists temp_path && Sys.is_directory temp_path then begin
+          printf "  Found matching temperature bin directory: %s\n" temp_path;
+          Dark_calibration.find_fits_files temp_path
+        end else begin
+          (* If no exact match, try to find the closest bin directory *)
+          printf "  No exact temperature bin match found, searching nearby bins...\n";
+          let temp_bins = ref [] in
+          
+          (* Scan dark_temps to find all temperature bin directories *)
+          (try
+            Array.iter (fun entry ->
+              let full_path = Filename.concat darks_dir entry in
+              if Sys.is_directory full_path && 
+                 String.length entry > 5 && 
+                 String.sub entry 0 5 = "temp_" then begin
+                try
+                  let bin_temp = int_of_string (String.sub entry 5 (String.length entry - 5)) in
+                  temp_bins := (bin_temp, full_path) :: !temp_bins
+                with _ -> ()
+              end
+            ) (Sys.readdir darks_dir)
+          with _ -> ());
+          
+          (* Sort bins by temperature difference *)
+          let sorted_bins = List.sort 
+            (fun (t1, _) (t2, _) -> compare (abs (t1 - temp_k)) (abs (t2 - temp_k)))
+            !temp_bins in
+          
+          match sorted_bins with
+          | [] -> 
+              printf "  No temperature bin directories found\n";
+              [||]
+          | (bin_temp, bin_path) :: _ ->
+              let bin_temp_c = float_of_int bin_temp -. 273.15 in
+              printf "  Using closest temperature bin: %s (%.1f°C, diff: %.1f°C)\n" 
+                bin_path bin_temp_c (abs_float (bin_temp_c -. temp));
+              Dark_calibration.find_fits_files bin_path
+        end
+      in
       
       if Array.length dark_files = 0 then begin
-        printf "  No dark frames found in %s\n" options.dark_dir;
+        printf "  No dark frames found\n";
         false
       end else begin
         printf "  Found %d dark frames\n" (Array.length dark_files);
