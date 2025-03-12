@@ -10,6 +10,7 @@ calibrated/
 tempdir/
 solved_verification/
 star_detection_results/
+comparison_results/
 archive.shar.txt
 altaz_errors.csv
 blink.sh

@@ -46,7 +46,7 @@
 (executable
  (name stack_comparison)
  (libraries str unix bigarray plplot cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
- (modules fits fits_utils parallel_plate_solve plate_solve_verification astrometric_alignment stack_comparison))
+ (modules fits fits_utils parallel_plate_solve plate_solve_verification astrometric_alignment triangle_alignment stack_comparison))
 
 (executable
   (name simbad_main)

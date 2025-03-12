@@ -6,6 +6,7 @@ open Fits
 open Fits_utils
 open Plate_solve_verification
 open Astrometric_alignment
+open Triangle_alignment
 
 (* Log levels *)
 type log_level = Debug | Info | Warning | Error
@@ -67,10 +68,11 @@ let detect_stars filename threshold =
     log Error (sprintf "Error detecting stars: %s" (Printexc.to_string e));
     None
 
-(* Function to align images using star patterns *)
+
+(* Replace the existing align_with_stars function with this improved version *)
 let align_with_stars reference_file target_file threshold max_stars =
   let start_time = Unix.gettimeofday() in
-  log Info (sprintf "Aligning %s to %s using star patterns" 
+  log Info (sprintf "Aligning %s to %s using triangle pattern matching" 
     (Filename.basename target_file) (Filename.basename reference_file));
   
   try
@@ -79,102 +81,93 @@ let align_with_stars reference_file target_file threshold max_stars =
     | Some (ref_hdrh, ref_stars, ref_time), Some (target_hdrh, target_stars, target_time) ->
         (* Limit stars for matching (use brightest stars) *)
         let ref_stars_limited = List.sort (fun s1 s2 -> 
-            compare s2.flux s1.flux  (* Descending order *))
+            compare s2.flux s1.flux)
             ref_stars |> List.filteri (fun i _ -> i < max_stars) in
         
         let target_stars_limited = List.sort (fun s1 s2 -> 
             compare s2.flux s1.flux)
             target_stars |> List.filteri (fun i _ -> i < max_stars) in
             
-        log Info (sprintf "Using %d reference stars and %d target stars for matching" 
+        log Info (sprintf "Using %d reference stars and %d target stars for triangle matching" 
           (List.length ref_stars_limited) (List.length target_stars_limited));
         
-        (* Find matching star patterns using a simple triangle-based algorithm *)
-        (* This is a simplified version - real implementation would be more robust *)
-        let matched_pairs = ref [] in
+        (* Use triangle-based alignment *)
+        let min_side_length = 15.0 in  (* Minimum triangle side to avoid noise *)
+        let min_similarity = 0.85 in   (* Minimum triangle similarity *)
+        let min_confidence = 0.6 in    (* Minimum confidence for star matches *)
         
-        (* Start with naive distance-based matching for this example *)
-        List.iter (fun ref_star ->
-          let best_match = ref None in
-          let min_dist = ref 100.0 in  (* Large initial value *)
-          
-          List.iter (fun target_star ->
-            (* Simple Euclidean distance for demonstration *)
-            let dx = ref_star.x -. target_star.x in
-            let dy = ref_star.y -. target_star.y in
-            let dist = sqrt (dx *. dx +. dy *. dy) in
-            
-            if dist < !min_dist && dist < 20.0 then begin  (* Arbitrary threshold *)
-              min_dist := dist;
-              best_match := Some target_star;
-            end
-          ) target_stars_limited;
-          
-          match !best_match with
-          | Some match_star -> 
-              matched_pairs := (ref_star, match_star) :: !matched_pairs
-          | None -> ()
-        ) ref_stars_limited;
-        
-        (* Calculate a simple translation transform from the matches *)
-        let dx_sum = ref 0.0 in
-        let dy_sum = ref 0.0 in
-        List.iter (fun (ref_star, target_star) ->
-          dx_sum := !dx_sum +. (ref_star.x -. target_star.x);
-          dy_sum := !dy_sum +. (ref_star.y -. target_star.y);
-        ) !matched_pairs;
-        
-        let pair_count = float_of_int (List.length !matched_pairs) in
-        let transform = 
-          if pair_count > 0.0 then
-            { dx = !dx_sum /. pair_count;
-              dy = !dy_sum /. pair_count;
-              rotation = 0.0;  (* Simple version doesn't estimate rotation *)
-              scale = 1.0 }    (* Simple version doesn't estimate scale *)
-          else
-            identity_transform
+        let (transform, star_matches) = 
+          align_with_triangles ref_stars_limited target_stars_limited 
+            ~max_stars ~min_side_length ~min_similarity ~min_confidence ()
         in
         
-        (* Calculate error statistics *)
-        let errors = List.map (fun (ref_star, target_star) ->
-          let adjusted_x = target_star.x +. transform.dx in
-          let adjusted_y = target_star.y +. transform.dy in
-          let err_x = ref_star.x -. adjusted_x in
-          let err_y = ref_star.y -. adjusted_y in
-          sqrt (err_x *. err_x +. err_y *. err_y)
-        ) !matched_pairs in
+        (* Calculate alignment error *)
+        let error = calculate_alignment_error transform star_matches in
         
-        let mean_error = 
-          if List.length errors > 0 then
-            List.fold_left (+.) 0.0 errors /. float_of_int (List.length errors)
+        (* Calculate statistics for reporting *)
+        let mean_error = error in
+        let max_error = 
+          if List.length star_matches > 0 then
+            List.fold_left (fun acc m ->
+              let tx = m.target_star.x in
+              let ty = m.target_star.y in
+              
+              (* Apply transform *)
+              let tx' = tx *. transform.scale *. cos transform.rotation -. 
+                      ty *. transform.scale *. sin transform.rotation in
+              let ty' = tx *. transform.scale *. sin transform.rotation +. 
+                      ty *. transform.scale *. cos transform.rotation in
+              
+              let tx'' = tx' +. transform.dx in
+              let ty'' = ty' +. transform.dy in
+              
+              let dx = m.ref_star.x -. tx'' in
+              let dy = m.ref_star.y -. ty'' in
+              let err = sqrt (dx *. dx +. dy *. dy) in
+              
+              max acc err
+            ) 0.0 star_matches
           else 0.0
         in
         
-        let max_error =
-          if List.length errors > 0 then
-            List.fold_left max 0.0 errors
-          else 0.0
-        in
-        
-        (* Calculate standard deviation *)
-        let variance = 
-          if List.length errors > 1 then
-            List.fold_left (fun acc err ->
+        (* Calculate stddev of errors *)
+        let stddev = 
+          if List.length star_matches > 1 then
+            let variance = List.fold_left (fun acc m ->
+              let tx = m.target_star.x in
+              let ty = m.target_star.y in
+              
+              (* Apply transform *)
+              let tx' = tx *. transform.scale *. cos transform.rotation -. 
+                      ty *. transform.scale *. sin transform.rotation in
+              let ty' = tx *. transform.scale *. sin transform.rotation +. 
+                      ty *. transform.scale *. cos transform.rotation in
+              
+              let tx'' = tx' +. transform.dx in
+              let ty'' = ty' +. transform.dy in
+              
+              let dx = m.ref_star.x -. tx'' in
+              let dy = m.ref_star.y -. ty'' in
+              let err = sqrt (dx *. dx +. dy *. dy) in
+              
               let diff = err -. mean_error in
               acc +. (diff *. diff)
-            ) 0.0 errors /. float_of_int (List.length errors - 1)
+            ) 0.0 star_matches /. float_of_int (List.length star_matches - 1) in
+            
+            sqrt variance
           else 0.0
         in
-        let stddev = sqrt variance in
         
         let end_time = Unix.gettimeofday() in
+        let matched_pairs = List.map (fun m -> (m.ref_star, m.target_star)) star_matches in
+        
         let result = {
-          method_name = "star_alignment";
+          method_name = "triangle_star_alignment";
           filename = target_file;
-          success = List.length !matched_pairs >= 3;  (* Need at least 3 matched pairs *)
+          success = List.length star_matches >= 3 && mean_error < 5.0;  (* Need at least 3 matched pairs with good accuracy *)
           reference_stars = ref_stars_limited;
           detected_stars = target_stars_limited;
-          matched_pairs = !matched_pairs;
+          matched_pairs;
           transform;
           error_stats = (mean_error, max_error, stddev);
           runtime = end_time -. start_time;
@@ -186,7 +179,7 @@ let align_with_stars reference_file target_file threshold max_stars =
         log Error "Failed to detect stars in reference or target image";
         None
   with e ->
-    log Error (sprintf "Error in star alignment: %s" (Printexc.to_string e));
+    log Error (sprintf "Error in triangle star alignment: %s" (Printexc.to_string e));
     None
 
 (* Helper function for WCS-based alignment *)
