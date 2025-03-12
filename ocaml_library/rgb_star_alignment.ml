@@ -1,37 +1,8 @@
-(* rgb_star_alignment.ml - Specialized for RGB FITS images *)
+(* rgb_star_alignment.ml - Integrated with existing FITS code *)
 
 open Types
-open Printf
 open Fits
 open Fits_utils
-
-(* Structure of star pattern for RGB images *)
-type rgb_star = {
-  x: float;          (* X coordinate in pixels *)
-  y: float;          (* Y coordinate in pixels *)
-  flux: float;       (* Integrated flux (brightness) *)
-  fwhm: float;       (* Full-width half-maximum (star size) *)
-  r: int;            (* Red channel value *)
-  g: int;            (* Green channel value *)
-  b: int;            (* Blue channel value *)
-}
-
-(* Structure for star pattern matching *)
-type star_pattern = {
-  center_star: rgb_star;
-  neighbors: rgb_star array;
-  distances: float array;    (* Distances from center to neighbors *)
-  angles: float array;       (* Angles from center to neighbors (radians from x-axis) *)
-  brightness_ratios: float array; (* Brightness ratios between center and neighbors *)
-}
-
-(* Star match result *)
-type star_match = {
-  ref_star: rgb_star;
-  target_star: rgb_star;
-  confidence: float;      (* Confidence score 0-1 *)
-  patterns_matched: int;  (* Number of patterns that support this match *)
-}
 
 (* Debug helper function *)
 let debug_print enabled fmt =
@@ -40,14 +11,25 @@ let debug_print enabled fmt =
   else
     Printf.ifprintf stdout fmt
 
-(* Extract RGB values from FITS image at given coordinates *)
-let extract_rgb_values data width height x y =
-  (* Ensure coordinates are within bounds *)
+(* Compute Euclidean distance between two star points *)
+let distance p1 p2 =
+  let dx = p1.x -. p2.x in
+  let dy = p1.y -. p2.y in
+  sqrt (dx *. dx +. dy *. dy)
+
+(* Extract RGB values from a star point using FITS data *)
+let extract_rgb_values filename data width height x y =
+  (* Get pixel coordinates as integers *)
   let x_int = max 0 (min (int_of_float x) (width - 1)) in
   let y_int = max 0 (min (int_of_float y) (height - 1)) in
   
-  (* For RGB FITS images (NAXIS=3), data is stored as separate planes *)
-  let r = data.(y_int).(x_int) in
+  (* For RGB FITS (NAXIS=3), we need to check how data is organized *)
+  (* First try to get the pixel value directly from Bigarray *)
+  let get_pixel y x =
+    try
+      get_pixel data y x
+    with _ -> 0
+  in
   
   (* Sample a 3x3 region around the star for better color estimation *)
   let r_sum = ref 0 in
@@ -55,38 +37,31 @@ let extract_rgb_values data width height x y =
   let b_sum = ref 0 in
   let count = ref 0 in
   
+  (* For RGB images, we would need to access each plane separately *)
+  (* This is a simplification - actual implementation depends on data layout *)
   for dy = -1 to 1 do
     for dx = -1 to 1 do
       let nx = x_int + dx in
       let ny = y_int + dy in
       if nx >= 0 && nx < width && ny >= 0 && ny < height then begin
-        (* For RGB FITS, we need to get values from each plane *)
-        (* This is a simplification - actual implementation depends on data layout *)
-        r_sum := !r_sum + data.(ny).(nx);
-        (* In real implementation, you would get g and b from their respective planes *)
-        (* For illustration, we're just estimating based on r *)
-        g_sum := !g_sum + (data.(ny).(nx) / 2);
-        b_sum := !b_sum + (data.(ny).(nx) / 3);
+        let pixel = get_pixel ny nx in
+        r_sum := !r_sum + pixel;
+        g_sum := !g_sum + pixel / 2;  (* Simplified - would need to access green plane *)
+        b_sum := !b_sum + pixel / 3;  (* Simplified - would need to access blue plane *)
         incr count;
       end
     done
   done;
   
-  if !count > 0 then
-    (!r_sum / !count, !g_sum / !count, !b_sum / !count)
-  else
-    (r, r/2, r/3)  (* Fallback if we couldn't sample region *)
-
-(* Convert standard star_point to rgb_star using image data *)
-let to_rgb_star data width height star =
-  (* Extract RGB values at star position *)
-  let r, g, b = extract_rgb_values data width height star.x star.y in
+  (* Calculate average values *)
+  let r = if !count > 0 then !r_sum / !count else get_pixel y_int x_int in
+  let g = if !count > 0 then !g_sum / !count else r / 2 in
+  let b = if !count > 0 then !b_sum / !count else r / 3 in
   
-  { x = star.x; y = star.y; flux = star.flux; fwhm = star.fwhm; 
-    r; g; b }
+  (r, g, b)
 
-(* create_star_pattern - properly fixed version with standard OCaml *)
-let create_star_pattern max_neighbors data width height star stars =
+(* Create a star pattern for matching - uses standard OCaml functions *)
+let create_star_pattern max_neighbors filename data width height star stars =
   (* Sort other stars by distance from this star *)
   let others_with_dist = ref [] in
   
@@ -133,7 +108,7 @@ let create_star_pattern max_neighbors data width height star stars =
   { center_star = star; neighbors; distances; angles; brightness_ratios }
 
 (* Calculate similarity between two star patterns *)
-let pattern_similarity p1 p2 angle_tolerance dist_tolerance =
+let pattern_similarity (p1:star_pattern) (p2:star_pattern) angle_tolerance dist_tolerance =
   (* Match neighbors by similar angles - accounting for global rotation *)
   let angle_diffs = Array.make (Array.length p1.angles) max_float in
   let best_rotation = ref 0.0 in
@@ -236,7 +211,7 @@ let match_star_patterns ref_patterns target_patterns min_match_count min_similar
           ref_star = ref_pattern.center_star;
           target_star = target_pattern.center_star;
           confidence = similarity;
-          patterns_matched = match_count;
+          match_count;
         } in
         matches := match_data :: !matches;
       end
@@ -362,9 +337,6 @@ let calculate_alignment_error transform matches =
   end
 
 (* Main function to align RGB images using star patterns *)
-(* rgb_star_alignment.ml - Fixed type conversion for RGB FITS images *)
-
-(* Main function to align RGB images using star patterns *)
 let align_rgb_images ref_file target_file ?(debug=false) () =
   debug_print debug "Starting RGB image alignment between %s and %s\n"
     (Filename.basename ref_file) (Filename.basename target_file);
@@ -398,8 +370,8 @@ let align_rgb_images ref_file target_file ?(debug=false) () =
       debug_print debug "Detecting stars...\n";
       let threshold = 5.0 in  (* Higher threshold for RGB images *)
       
-      let (_, ref_data) = read_fits_large ref_file in
-      let (_, target_data) = read_fits_large target_file in
+      let (ref_hdrh, ref_data) = read_fits_large ref_file in
+      let (target_hdrh, target_data) = read_fits_large target_file in
       
       let ref_stats = compute_image_stats ref_data in
       let target_stats = compute_image_stats target_data in
@@ -414,8 +386,8 @@ let align_rgb_images ref_file target_file ?(debug=false) () =
       let max_stars = 50 in
       
       (* Sort stars by brightness (flux) *)
-      let ref_stars_sorted = List.sort (fun (s1:star_point) (s2:star_point) -> compare s2.flux s1.flux) ref_stars in
-      let target_stars_sorted = List.sort (fun (s1:star_point) (s2:star_point) -> compare s2.flux s1.flux) target_stars in
+      let ref_stars_sorted = List.sort (fun (s1:rgb_star) (s2:rgb_star) -> compare s2.flux s1.flux) ref_stars in
+      let target_stars_sorted = List.sort (fun (s1:rgb_star) (s2:rgb_star) -> compare s2.flux s1.flux) target_stars in
       
       (* Take only the first max_stars elements *)
       let rec take n lst acc =
@@ -430,19 +402,19 @@ let align_rgb_images ref_file target_file ?(debug=false) () =
         (min (List.length ref_stars_limited) (List.length target_stars_limited));
       
       (* Convert standard stars to RGB stars *)
-      let ref_rgb_stars = List.map (to_rgb_star ref_data ref_width ref_height) ref_stars_limited in
-      let target_rgb_stars = List.map (to_rgb_star target_data target_width target_height) target_stars_limited in
+      let ref_rgb_stars = ref_stars_limited in
+      let target_rgb_stars = target_stars_limited in
       
       (* Create star patterns *)
       debug_print debug "Creating star patterns...\n";
       let pattern_neighbors = 8 in  (* Use 8 nearest neighbors for each star *)
       
       let ref_patterns = Array.of_list 
-        (List.map (fun s -> create_star_pattern pattern_neighbors ref_data ref_width ref_height s ref_rgb_stars) 
+        (List.map (fun s -> create_star_pattern pattern_neighbors ref_file ref_data ref_width ref_height s ref_rgb_stars) 
                  ref_rgb_stars) in
                  
       let target_patterns = Array.of_list
-        (List.map (fun s -> create_star_pattern pattern_neighbors target_data target_width target_height s target_rgb_stars)
+        (List.map (fun s -> create_star_pattern pattern_neighbors target_file target_data target_width target_height s target_rgb_stars)
                  target_rgb_stars) in
       
       debug_print debug "Created %d reference patterns and %d target patterns\n"

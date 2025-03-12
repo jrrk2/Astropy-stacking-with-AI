@@ -377,6 +377,7 @@ let simple_star_detection data width height threshold =
             y = float_of_int y; 
             flux = float_of_int !flux;
             fwhm = 0.0;  (* Don't calculate FWHM for this simple test *)
+            r = !flux; g = !flux; b = !flux;
           } :: !stars;
         end
       end
@@ -384,7 +385,7 @@ let simple_star_detection data width height threshold =
   done;
   
   (* Sort stars by brightness (descending) *)
-  let sorted_stars = List.sort (fun s1 s2 -> 
+  let sorted_stars = List.sort (fun (s1:rgb_star) (s2:rgb_star) -> 
     compare s2.flux s1.flux
   ) !stars in
   

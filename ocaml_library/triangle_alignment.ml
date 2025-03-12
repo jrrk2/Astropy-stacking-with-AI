@@ -2,34 +2,6 @@
 
 open Types
 
-(* Triangle representation using three star points *)
-type triangle = {
-  stars: star_point array;  (* The three stars making up the triangle *)
-  sides: float array;       (* Lengths of the three sides *)
-  angles: float array;      (* Angles between sides in radians *)
-  perimeter: float;         (* Sum of sides *)
-  area: float;              (* Area of the triangle *)
-  side_ratios: float array; (* Ratios of sides (sorted) *)
-  centroid: float * float;  (* Centroid coordinates *)
-  (* New field for efficient matching *)
-  signature: float array;   (* Geometric hash for fast comparison *)
-}
-
-(* Triangle matching result *)
-type triangle_match = {
-  ref_triangle: triangle;
-  target_triangle: triangle;
-  similarity: float;        (* Similarity score 0-1 *)
-}
-
-(* Star match based on triangles *)
-type star_match = {
-  ref_star: star_point;
-  target_star: star_point;
-  match_count: int;         (* Number of triangles supporting this match *)
-  confidence: float;        (* Confidence score 0-1 *)
-}
-
 (* Compute Euclidean distance between two star points *)
 let distance p1 p2 =
   let dx = p1.x -. p2.x in
@@ -112,7 +84,8 @@ let create_triangle s1 s2 s3 =
   
   (* Create signature for fast matching *)
   let signature = create_signature sides angles in
-  
+
+  let (tri:triangle) =
   {
     stars;
     sides;
@@ -122,7 +95,7 @@ let create_triangle s1 s2 s3 =
     side_ratios;
     centroid = (cx, cy);
     signature;
-  }
+  } in tri
 
 (* Filter stars based on proximity to reduce false triangles *)
 let filter_nearby_stars min_distance stars =
@@ -310,9 +283,9 @@ let find_star_correspondences triangle_matches min_confidence =
   ) triangle_matches;
   
   (* Convert to star matches *)
-  let star_matches = ref [] in
+  let (star_matches:star_match list ref) = ref [] in
   
-  Hashtbl.iter (fun (ref_star, target_star) (count, total_confidence) ->
+  Hashtbl.iter (fun ((ref_star:rgb_star), (target_star:rgb_star)) (count, total_confidence) ->
     let confidence = total_confidence /. float_of_int count in
     if confidence >= min_confidence && count >= 3 then  (* Require support from multiple triangles *)
       star_matches := { ref_star; target_star; match_count = count; confidence } :: !star_matches

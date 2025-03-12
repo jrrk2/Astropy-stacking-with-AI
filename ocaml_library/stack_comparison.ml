@@ -6,7 +6,6 @@ open Fits
 open Fits_utils
 open Plate_solve_verification
 open Astrometric_alignment
-open Triangle_alignment
 
 (* Log levels *)
 type log_level = Debug | Info | Warning | Error
@@ -16,9 +15,9 @@ type alignment_result = {
   method_name: string;
   filename: string;
   success: bool;
-  reference_stars: star_point list;
-  detected_stars: star_point list;
-  matched_pairs: (star_point * star_point) list;
+  reference_stars: rgb_star list;
+  detected_stars: rgb_star list;
+  matched_pairs: (rgb_star * rgb_star) list;
   transform: alignment_parameters;
   error_stats: float * float * float;  (* mean, max, stddev *)
   runtime: float;
@@ -77,8 +76,8 @@ let align_with_stars reference_file target_file _threshold _max_stars =
   | Some (transform, matches, error, align_time) ->
       (* Convert matches to the format expected by the comparison framework *)
       let matched_pairs = List.map (fun m -> 
-        ({ x = m.ref_star.x; y = m.ref_star.y; flux = m.ref_star.flux; fwhm = m.ref_star.fwhm },
-         { x = m.target_star.x; y = m.target_star.y; flux = m.target_star.flux; fwhm = m.target_star.fwhm })
+        ({ x = m.ref_star.x; y = m.ref_star.y; flux = m.ref_star.flux; fwhm = m.ref_star.fwhm; r=m.ref_star.r; g=m.ref_star.g; b=m.ref_star.b },
+         { x = m.target_star.x; y = m.target_star.y; flux = m.target_star.flux; fwhm = m.target_star.fwhm; r=m.ref_star.r; g=m.ref_star.g; b=m.ref_star.b })
       ) matches in
       
       let result = {
@@ -188,12 +187,12 @@ let align_with_wcs ref_hdrh target_hdrh reference_file target_file start_time =
         
         (* Create dummy stars for compatibility *)
         let ref_stars = List.map (fun (x, y) ->
-          { x; y; flux = 0.0; fwhm = 0.0 }
+          { x; y; flux = 0.0; fwhm = 0.0; r = 0; g = 0; b = 0 }
         ) !sample_points in
         
         let target_stars = List.map (fun (x, y) ->
           let (tx, ty) = (x -. avg_dx, y -. avg_dy) in
-          { x = tx; y = ty; flux = 0.0; fwhm = 0.0 }
+          { x = tx; y = ty; flux = 0.0; fwhm = 0.0; r = 0; g = 0; b = 0 }
         ) !sample_points in
         
         let matched_pairs = List.map2 (fun r t -> (r, t)) ref_stars target_stars in

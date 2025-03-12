@@ -317,7 +317,7 @@ let detect_stars_in_image data stats threshold =
   let threshold_value = int_of_float (stats.mean +. threshold *. stats.stddev) in
   
   (* First pass: find local maxima that exceed threshold *)
-  let stars = ref [] in
+  let (stars:rgb_star list ref) = ref [] in
   
   for y = 2 to height - 3 do
     for x = 2 to width - 3 do
@@ -372,13 +372,16 @@ let detect_stars_in_image data stats threshold =
             y = centroid_y; 
             flux = float_of_int !flux;
             fwhm = fwhm;
+            r = !flux;
+            g = !flux;
+            b = !flux;
           } :: !stars;
         end
     done
   done;
   
   (* Sort stars by brightness (descending) *)
-  let sorted_stars = List.sort (fun s1 s2 -> 
+  let sorted_stars = List.sort (fun (s1:rgb_star) (s2:rgb_star) -> 
     compare s2.flux s1.flux
   ) !stars in
   

@@ -208,7 +208,7 @@ let main () =
   
   List.iter2 (fun filename (hdrh, stats, stars) ->
     (* Calculate median FWHM *)
-    let sorted_fwhms = List.map (fun (star:star_point) -> star.fwhm) stars 
+    let sorted_fwhms = List.map (fun (star:rgb_star) -> star.fwhm) stars 
                       |> List.sort compare in
     let median_fwhm = 
       if List.length sorted_fwhms > 0 then
@@ -245,14 +245,14 @@ let main () =
   printf "Results saved to %s\n" csv_path;
   
   (* Generate individual star lists *)
-  List.iter2 (fun filename (hdrh, stats, stars) ->
+  List.iter2 (fun filename (hdrh, stats, (stars:rgb_star list)) ->
     let base_name = Filename.basename filename |> Filename.remove_extension in
     let star_list_path = Filename.concat !output_dir (base_name ^ "_stars.csv") in
     
     let star_csv = open_out star_list_path in
     fprintf star_csv "X,Y,Flux,FWHM\n";
     
-    List.iter (fun (star:star_point) ->
+    List.iter (fun (star:rgb_star) ->
       fprintf star_csv "%.2f,%.2f,%.1f,%.2f\n"
         star.x star.y star.flux star.fwhm
     ) stars;

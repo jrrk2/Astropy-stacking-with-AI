@@ -101,14 +101,6 @@ dec_deg: float;
 mag_v: float option;
 }
 
-(* Types for star detection and alignment *)
-type star_point = {
-  x: float;          (* X coordinate in pixels *)
-  y: float;          (* Y coordinate in pixels *)
-  flux: float;       (* Integrated flux (brightness) *)
-  fwhm: float;       (* Full-width half-maximum (star size) *)
-}
-
 type alignment_parameters = {
   dx: float;         (* X translation *)
   dy: float;         (* Y translation *)
@@ -137,6 +129,54 @@ type stacking_result = {
   failed_images: string array;     (* Filenames of images that failed to align *)
   stacking_method: stacking_method; (* Method used for stacking *)
   output_file: string;            (* Path to output stacked image *)
+}
+
+(* Structure of star pattern for RGB images *)
+type rgb_star = {
+  x: float;          (* X coordinate in pixels *)
+  y: float;          (* Y coordinate in pixels *)
+  flux: float;       (* Integrated flux (brightness) *)
+  fwhm: float;       (* Full-width half-maximum (star size) *)
+  r: int;            (* Red channel value *)
+  g: int;            (* Green channel value *)
+  b: int;            (* Blue channel value *)
+}
+
+(* Structure for star pattern matching *)
+type star_pattern = {
+  center_star: rgb_star;
+  neighbors: rgb_star array;
+  distances: float array;    (* Distances from center to neighbors *)
+  angles: float array;       (* Angles from center to neighbors (radians from x-axis) *)
+  brightness_ratios: float array; (* Brightness ratios between center and neighbors *)
+}
+
+(* Triangle representation using three star points *)
+type triangle = {
+  stars: rgb_star array;  (* The three stars making up the triangle *)
+  sides: float array;       (* Lengths of the three sides *)
+  angles: float array;      (* Angles between sides in radians *)
+  perimeter: float;         (* Sum of sides *)
+  area: float;              (* Area of the triangle *)
+  side_ratios: float array; (* Ratios of sides (sorted) *)
+  centroid: float * float;  (* Centroid coordinates *)
+  (* New field for efficient matching *)
+  signature: float array;   (* Geometric hash for fast comparison *)
+}
+
+(* Triangle matching result *)
+type triangle_match = {
+  ref_triangle: triangle;
+  target_triangle: triangle;
+  similarity: float;        (* Similarity score 0-1 *)
+}
+
+(* Star match based on triangles *)
+type star_match = {
+  ref_star: rgb_star;
+  target_star: rgb_star;
+  match_count: int;         (* Number of triangles supporting this match *)
+  confidence: float;        (* Confidence score 0-1 *)
 }
 
 (* Implementation of List.take function *)
