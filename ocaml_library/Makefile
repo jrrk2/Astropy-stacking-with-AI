@@ -35,3 +35,6 @@ _build/default/astrometric_stack_cli.exe:
 
 _build/default/altaz_radec_model.exe:
 	dune build $@
+
+_build/default/star_detection_cli.exe:
+	dune build $@

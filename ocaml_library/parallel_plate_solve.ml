@@ -1,7 +1,9 @@
-(* Add this to the top of plate_solve_verification.ml *)
 open Lwt.Infix
+open Printf
+open Fits
+open Types
+open Plate_solve_verification
 
-(* A simpler worker pool implementation using Lwt_list *)
 let parallel_map_limited ~limit f items =
   (* Initialize shared state *)
   let remaining_items = ref items in
