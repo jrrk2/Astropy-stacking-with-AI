@@ -1,4 +1,4 @@
-(* plate_solve_cli.ml - Command-line interface with direct process-based parallelization *)
+(* plate_solve_cli.ml - Command-line interface for parallel plate solving *)
 
 open Types
 open Fits
@@ -92,7 +92,7 @@ let main () =
     cpulimit = !cpulimit;
   } in
   
-  (* Process files using direct process management for true parallelism *)
+  (* Process files using parallel processing *)
   let (success_count, total_count, avg_error) = 
     verify_fits_batch_with_processes ~worker_count:!workers files_to_process !output_dir options 
   in

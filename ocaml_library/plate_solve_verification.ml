@@ -1,4 +1,4 @@
-(* plate_solve_verification.ml - Refactored as a library *)
+(* plate_solve_verification.ml - Complete solution with parallelization *)
 
 open Types
 open Fits
@@ -107,7 +107,117 @@ let build_solve_command options filename output_dir =
   List.filter (fun s -> s <> "") cmd_parts
   |> String.concat " "
 
-(* A more explicit approach using direct process management *)
+(* Traditional sequential solve-field function *)
+let solve_field options filename output_dir =
+  let start_time = Unix.gettimeofday() in
+  
+  (* Read mount coordinates from FITS header *)
+  let hdrh = just_header filename in
+  options.mount_ra <-
+    (try parse_float hdrh "MOUNTRA" 
+    with _ -> parse_float hdrh "OBJCTRA");
+
+  options.mount_dec <-
+    (try parse_float hdrh "MOUNTDEC=" 
+    with _ -> parse_float hdrh "OBJCTDEC"); 
+  
+  (* Build and execute solve-field command *)
+  let command = build_solve_command options filename output_dir in
+  printf "Running: %s\n" command;
+  flush stdout;
+  
+  let exit_code = Sys.command command in
+  let end_time = Unix.gettimeofday() in
+  let solve_time = end_time -. start_time in
+  
+  printf "solve-field finished with exit code %d in %.1f seconds\n" exit_code solve_time;
+  
+  (* Check if solving was successful *)
+  let base_name = Filename.basename filename |> Filename.remove_extension in
+  let wcs_file = Filename.concat output_dir (base_name ^ ".wcs") in
+  let solved_flag = Filename.concat output_dir (base_name ^ ".solved") in
+  
+  (* Add diagnostic output of files in the directory *)
+  if options.verbose then (
+  printf "Checking for output files in: %s\n" output_dir;
+  let dir_contents = Sys.readdir output_dir |> Array.to_list in
+  List.iter (fun file -> 
+    printf "  Found: %s\n" file
+  ) dir_contents);
+  
+  if exit_code = 0 && (Sys.file_exists wcs_file || Sys.file_exists solved_flag) then
+    (* Solving succeeded - read solved coordinates from solved FITS file *)
+    let solved_fits = Filename.concat output_dir (base_name ^ ".fits") in
+    
+    if Sys.file_exists solved_fits then
+      try
+        let solved_hdrh = just_header solved_fits in
+        let solved_ra = parse_float solved_hdrh "CRVAL1" in
+        let solved_dec = parse_float solved_hdrh "CRVAL2" in
+        
+        (* Calculate difference *)
+        let ra_error = solved_ra -. options.mount_ra in
+        let dec_error = solved_dec -. options.mount_dec in
+        let total_error = sqrt (ra_error *. ra_error +. dec_error *. dec_error) in
+        
+        printf "SUCCESS: RA=%.4f° (mount=%.4f°, error=%.4f°), Dec=%.4f° (mount=%.4f°, error=%.4f°)\n" 
+          solved_ra options.mount_ra ra_error solved_dec options.mount_dec dec_error;
+        printf "Total error: %.4f°\n" total_error;
+        
+        {
+          success = true;
+          filename = Filename.basename filename;
+          mount_ra = options.mount_ra;
+          mount_dec = options.mount_dec;
+          solved_ra = Some solved_ra;
+          solved_dec = Some solved_dec;
+          ra_error = Some ra_error;
+          dec_error = Some dec_error;
+          total_error = Some total_error;
+          solve_time;
+        }
+      with e ->
+        printf "ERROR reading solved coordinates: %s\n" (Printexc.to_string e);
+        {
+          success = false;
+          filename = Filename.basename filename;
+          mount_ra = options.mount_ra;
+          mount_dec = options.mount_dec;
+          solved_ra = None;
+          solved_dec = None;
+          ra_error = None;
+          dec_error = None;
+          total_error = None;
+          solve_time;
+        }
+    else
+      (* WCS file exists but no solved FITS *)
+      {
+        success = false;
+        filename = Filename.basename filename;
+        mount_ra = options.mount_ra;
+        mount_dec = options.mount_dec;
+        solved_ra = None;
+        solved_dec = None;
+        ra_error = None;
+        dec_error = None;
+        total_error = None;
+        solve_time;
+      }
+  else
+    (* Solving failed *)
+    {
+      success = false;
+      filename = Filename.basename filename;
+      mount_ra = options.mount_ra;
+      mount_dec = options.mount_dec;
+      solved_ra = None;
+      solved_dec = None;
+      ra_error = None;
+      dec_error = None;
+      total_error = None;
+      solve_time;
+    }
 
 (* Create a temporary file for process output *)
 let create_temp_file prefix suffix =
@@ -121,7 +231,7 @@ let create_temp_file prefix suffix =
   in
   try_name 0
 
-(* Replace run_command_async with this improved version *)
+(* Run a command asynchronously with output to a file *)
 let run_command_async command =
   let output_file = create_temp_file "solve_field" ".log" in
   
@@ -142,20 +252,7 @@ let run_command_async command =
   
   (pid, output_file)
 
-(* Replace the wait_for_process function with this improved version *)
-let wait_for_process pid =
-  try
-    let (_, status) = Unix.waitpid [] pid in
-    match status with
-    | Unix.WEXITED code -> code
-    | Unix.WSIGNALED _ -> -1  (* Process terminated by signal *)
-    | Unix.WSTOPPED _ -> -2   (* Process stopped by signal *)
-  with Unix.Unix_error (Unix.ECHILD, _, _) ->
-    (* Process no longer exists *)
-    Printf.printf "Warning: Process %d no longer exists\n" pid;
-    -1
-
-(* Run solve-field using direct process management *)
+(* Initialize solve-field process with information for later collection *)
 let solve_field_with_process options filename output_dir =
   let start_time = Unix.gettimeofday () in
   
@@ -178,15 +275,20 @@ let solve_field_with_process options filename output_dir =
   (* Run the command as a separate process *)
   let (pid, output_file) = run_command_async command in
   
-  (* This is now a non-blocking return point - the process is running in the background *)
+  (* Return the process info tuple for later collection *)
   (pid, start_time, output_file, filename, options, output_dir)
 
 (* Collect results from a finished solve-field process *)
-let collect_solve_result (pid, start_time, output_file, filename, options, output_dir) =
-  (* Wait for process to finish *)
-  let exit_code = wait_for_process pid in
+let collect_solve_result (pid, start_time, output_file, filename, options, output_dir) status =
   let end_time = Unix.gettimeofday() in
   let solve_time = end_time -. start_time in
+  
+  (* Parse the exit code from the status *)
+  let exit_code = match status with
+    | Unix.WEXITED code -> code
+    | Unix.WSIGNALED _ -> -1  (* Process terminated by signal *)
+    | Unix.WSTOPPED _ -> -2   (* Process stopped by signal *)
+  in
   
   (* Read process output *)
   let output = 
@@ -286,43 +388,25 @@ let collect_solve_result (pid, start_time, output_file, filename, options, outpu
       solve_time;
     }
 
-(* Replace verify_fits_batch_with_processes with this fixed version *)
-let verify_fits_batch_with_processes ?(worker_count=0) files output_dir options =
-  (* Create output directory if it doesn't exist *)
-  if not (Sys.file_exists output_dir) then
-    Unix.mkdir output_dir 0o755;
-  
-  (* Determine number of workers *)
-  let cpu_count = 8 in
-  let max_workers = 
-    if worker_count > 0 then worker_count
-    else max 1 (cpu_count * 3 / 4) (* Default to 75% of CPU cores *)
-  in
-  
-  Printf.printf "Running with %d parallel workers (detected %d CPUs)\n" 
-    max_workers cpu_count;
-  
-  (* Set to track active processes *)
-  let active_processes = Hashtbl.create max_workers in
-  let results = ref [] in
-  let remaining_files = ref files in
-  
-  (* Start the initial batch of processes *)
-  for _ = 1 to min max_workers (List.length !remaining_files) do
-    match !remaining_files with
-    | file :: rest ->
-        remaining_files := rest;
-        let process_info = solve_field_with_process options file output_dir in
-        let pid = match process_info with (pid, _, _, _, _, _) -> pid in
-        Hashtbl.add active_processes pid process_info;
-        (* Add a small delay between starting processes to prevent race conditions *)
-        Unix.sleepf 0.1;
-    | [] -> ()
-  done;  
+(* Detect number of CPU cores available *)
+let detect_cpu_count () =
+  try int_of_string (Sys.getenv "NUMBER_OF_PROCESSORS")
+  with _ -> 
+    try
+      let ic = Unix.open_process_in "nproc" in
+      let cores = input_line ic in
+      let _ = Unix.close_process_in ic in
+      int_of_string cores
+    with _ -> 
+      try
+        let ic = Unix.open_process_in "sysctl -n hw.ncpu" in
+        let cores = input_line ic in
+        let _ = Unix.close_process_in ic in
+        int_of_string cores
+      with _ -> 4  (* Default to 4 cores if detection fails *)
 
-
-(* Update process_loop in verify_fits_batch_with_processes to use blocking waitpid for one process at a time *)
-let rec process_loop active_processes remaining_files results max_workers =
+(* Process a batch of files with parallel execution *)
+let rec process_loop active_processes remaining_files results max_workers options output_dir =
   if Hashtbl.length active_processes = 0 && List.length !remaining_files = 0 then
     (* All done *)
     !results
@@ -341,7 +425,7 @@ let rec process_loop active_processes remaining_files results max_workers =
         (* If this process is in our table, collect its result *)
         if Hashtbl.mem active_processes pid then begin
           let process_info = Hashtbl.find active_processes pid in
-          let result = collect_solve_result process_info in
+          let result = collect_solve_result process_info status in
           results := result :: !results;
           Hashtbl.remove active_processes pid;
         end else
@@ -370,10 +454,45 @@ let rec process_loop active_processes remaining_files results max_workers =
       (Hashtbl.length active_processes) (List.length !remaining_files) (List.length !results);
     
     (* Continue processing *)
-    process_loop active_processes remaining_files results max_workers
-  end in
+    process_loop active_processes remaining_files results max_workers options output_dir
+  end
+
+(* Process a batch of files using parallel execution *)
+let verify_fits_batch_with_processes ?(worker_count=0) files output_dir options =
+  (* Create output directory if it doesn't exist *)
+  if not (Sys.file_exists output_dir) then
+    Unix.mkdir output_dir 0o755;
+  
+  (* Determine number of workers *)
+  let cpu_count = detect_cpu_count () in
+  let max_workers = 
+    if worker_count > 0 then worker_count
+    else max 1 (cpu_count * 3 / 4) (* Default to 75% of CPU cores *)
+  in
+  
+  Printf.printf "Running with %d parallel workers (detected %d CPUs)\n" 
+    max_workers cpu_count;
+  
+  (* Set to track active processes *)
+  let active_processes = Hashtbl.create max_workers in
+  let results = ref [] in
+  let remaining_files = ref files in
+  
+  (* Start the initial batch of processes *)
+  for _ = 1 to min max_workers (List.length !remaining_files) do
+    match !remaining_files with
+    | file :: rest ->
+        remaining_files := rest;
+        let process_info = solve_field_with_process options file output_dir in
+        let pid = match process_info with (pid, _, _, _, _, _) -> pid in
+        Hashtbl.add active_processes pid process_info;
+        (* Add a small delay between starting processes to prevent race conditions *)
+        Unix.sleepf 0.1;
+    | [] -> ()
+  done;
+  
   (* Run the processing loop with our updated implementation *)
-  let all_results = process_loop active_processes remaining_files results max_workers in
+  let all_results = process_loop active_processes remaining_files results max_workers options output_dir in
   
   (* Generate summary report *)
   let csv_path = Filename.concat output_dir "verification_results.csv" in
@@ -395,15 +514,15 @@ let rec process_loop active_processes remaining_files results max_workers =
       (match r.dec_error with Some v -> sprintf "%.6f" v | None -> "")
       (match r.total_error with Some v -> sprintf "%.6f" v | None -> "")
       r.solve_time
-  ) !results;
+  ) all_results;
   
   close_out csv;
   printf "Results saved to %s\n" csv_path;
   
   (* Calculate statistics *)
-  let successful = List.filter (fun r -> r.success) !results in
+  let successful = List.filter (fun r -> r.success) all_results in
   let success_count = List.length successful in
-  let total_count = List.length !results in
+  let total_count = List.length all_results in
   let success_rate = if total_count > 0 then 
     float_of_int success_count /. float_of_int total_count *. 100.0 
   else 0.0 in
@@ -486,7 +605,7 @@ let rec process_loop active_processes remaining_files results max_workers =
                                    | None -> "-");
     fprintf html "  <td>%.1f sec</td>\n" r.solve_time;
     fprintf html "</tr>\n";
-  ) !results;
+  ) all_results;
   
   fprintf html "</table>\n";
   fprintf html "</body>\n</html>\n";
