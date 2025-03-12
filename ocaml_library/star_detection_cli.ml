@@ -80,7 +80,7 @@ let generate_star_visualization filename stars output_dir =
     printf "  Generated visualization: %s\n" ppm_path;
     
     (* Try to convert to PNG if ImageMagick is available *)
-    let convert_cmd = sprintf "convert %s %s" ppm_path viz_path in
+    let convert_cmd = sprintf "magick %s %s" ppm_path viz_path in
     let convert_result = Sys.command convert_cmd in
     
     if convert_result = 0 then begin

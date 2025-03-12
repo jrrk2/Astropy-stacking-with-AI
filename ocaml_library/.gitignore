@@ -9,4 +9,8 @@ norm/
 calibrated/
 tempdir/
 solved_verification/
+star_detection_results/
 archive.shar.txt
+altaz_errors.csv
+blink.sh
+plot.py

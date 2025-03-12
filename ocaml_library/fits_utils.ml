@@ -1,4 +1,4 @@
-(* fits_utils.ml - Utilities for working with FITS files *)
+(* fits_utils.ml - Corrected version with endian fix *)
 
 open Printf
 open Types
@@ -75,24 +75,51 @@ let read_fits_data_mmap filename hdrh =
   let data = 
     match bitpix with
     | 16 -> 
-        (* 16-bit integers *)
+        (* 16-bit integers - when using memory mapping, we need to handle endianness *)
+        (* Create a raw memory mapped array *)
         let arr = Unix.map_file fd ~pos int16_unsigned c_layout false [|height; width|] in
-        Bigarray.array2_of_genarray arr
+        let mapped_data = Bigarray.array2_of_genarray arr in
+        
+        (* Create a new array with correct endianness *)
+        let fixed_data = Bigarray.Array2.create int16_unsigned c_layout height width in
+        
+        (* Copy with byte swapping to fix endianness *)
+        for y = 0 to height - 1 do
+          for x = 0 to width - 1 do
+            let value = Bigarray.Array2.get mapped_data y x in
+            (* Swap bytes to fix endianness - convert between big-endian and native *)
+            let swapped = ((value land 0xff) lsl 8) lor ((value lsr 8) land 0xff) in
+            Bigarray.Array2.set fixed_data y x swapped
+          done
+        done;
+        
+        Unix.close fd;  (* Close original mapping *)
+        fixed_data
         
     | 32 -> 
-        (* 32-bit integers - map and convert *)
+        (* 32-bit integers - map and convert with endian fixing *)
         let arr = Unix.map_file fd ~pos int32 c_layout false [|height; width|] in
         let int32_data = Bigarray.array2_of_genarray arr in
         
         (* Create a new 16-bit array for the result *)
         let result = Bigarray.Array2.create int16_unsigned c_layout height width in
         
-        (* Convert the 32-bit data to 16-bit, with appropriate scaling *)
+        (* Convert the 32-bit data to 16-bit, with appropriate scaling and endian fix *)
         for y = 0 to height - 1 do
           for x = 0 to width - 1 do
             let val32 = Bigarray.Array2.get int32_data y x in
+            (* Fix endianness by byte swapping *)
+            let swapped32 = 
+              Int32.logor 
+                (Int32.shift_left (Int32.logand val32 0xFFl) 24)
+                (Int32.logor
+                  (Int32.shift_left (Int32.logand (Int32.shift_right_logical val32 8) 0xFFl) 16)
+                  (Int32.logor
+                    (Int32.shift_left (Int32.logand (Int32.shift_right_logical val32 16) 0xFFl) 8)
+                    (Int32.shift_right_logical (Int32.logand val32 0xFF000000l) 24)))
+            in
             (* Scale down to 16-bit range if needed *)
-            let val16 = Int32.to_int (Int32.shift_right val32 16) in
+            let val16 = Int32.to_int (Int32.shift_right swapped32 16) in
             Bigarray.Array2.set result y x (min 65535 (max 0 val16))
           done
         done;
@@ -100,7 +127,7 @@ let read_fits_data_mmap filename hdrh =
         result
         
     | -32 ->
-        (* 32-bit float - we'll use a float Bigarray and convert *)
+        (* 32-bit float - we'll use a float Bigarray and convert with endian fix *)
         let arr = Unix.map_file fd ~pos float32 c_layout false [|height; width|] in
         let float_data = Bigarray.array2_of_genarray arr in
         
@@ -111,11 +138,28 @@ let read_fits_data_mmap filename hdrh =
         let bzero = try parse_float hdrh "BZERO" with _ -> 0.0 in
         let bscale = try parse_float hdrh "BSCALE" with _ -> 1.0 in
         
+        (* Helper to swap float endianness *)
+        let swap_float_bytes f =
+          let i = Int32.bits_of_float f in
+          let swapped = 
+            Int32.logor 
+              (Int32.shift_left (Int32.logand i 0xFFl) 24)
+              (Int32.logor
+                (Int32.shift_left (Int32.logand (Int32.shift_right_logical i 8) 0xFFl) 16)
+                (Int32.logor
+                  (Int32.shift_left (Int32.logand (Int32.shift_right_logical i 16) 0xFFl) 8)
+                  (Int32.shift_right_logical (Int32.logand i 0xFF000000l) 24)))
+          in
+          Int32.float_of_bits swapped
+        in
+        
         for y = 0 to height - 1 do
           for x = 0 to width - 1 do
             let fval = Bigarray.Array2.get float_data y x in
+            (* Swap bytes to fix endianness *)
+            let corrected_fval = swap_float_bytes fval in
             (* Apply BZERO and BSCALE if present *)
-            let scaled = (fval -. bzero) /. bscale in
+            let scaled = (corrected_fval -. bzero) /. bscale in
             (* Convert to 16-bit range (0-65535) *)
             let val16 = int_of_float (min 65535.0 (max 0.0 scaled)) in
             Bigarray.Array2.set result y x val16
@@ -139,7 +183,7 @@ let read_fits_large filename =
   scan_header hdrh header 0;
   close_in fd;
   
-  (* Now read the data with memory mapping *)
+  (* Now read the data with memory mapping and endian fix *)
   let data = read_fits_data_mmap filename hdrh in
   
   (hdrh, data)
@@ -202,7 +246,7 @@ let compute_image_stats data =
   }
 
 (* Estimate FWHM (Full Width at Half Maximum) of a star *)
-and estimate_fwhm data y x peak_value =
+let estimate_fwhm data y x peak_value =
   (* Background level estimation (use local background) *)
   let background = ref 0 in
   let bg_count = ref 0 in
@@ -360,8 +404,11 @@ let get_timestamp hdrh =
          Unix.mktime tm |> fst)
   with _ ->
     (* Fall back to file modification time *)
-    let filename = Hashtbl.find hdrh "FILENAME" in
-    (Unix.stat filename).Unix.st_mtime
+    let filename = try Hashtbl.find hdrh "FILENAME" with _ -> "" in
+    if filename <> "" then
+      (Unix.stat filename).Unix.st_mtime
+    else
+      Unix.gettimeofday()  (* Current time as last resort *)
 
 (* Helper function to extract temperature from FITS header *)
 let get_temperature hdrh =

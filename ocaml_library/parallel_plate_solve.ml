@@ -82,13 +82,13 @@ let verify_fits_batch files output_dir options =
     try int_of_string (Sys.getenv "NUMBER_OF_PROCESSORS")
     with _ -> 
       try
-        let ic = Unix.open_process_in "nproc" in
+        let ic = Unix.open_process_in "sysctl -n hw.ncpu" in
         let cores = input_line ic in
         let _ = Unix.close_process_in ic in
         int_of_string cores
       with _ -> 
         try
-          let ic = Unix.open_process_in "sysctl -n hw.ncpu" in
+          let ic = Unix.open_process_in "nproc" in
           let cores = input_line ic in
           let _ = Unix.close_process_in ic in
           int_of_string cores
