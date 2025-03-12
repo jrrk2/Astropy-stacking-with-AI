@@ -92,9 +92,9 @@ let generate_star_visualization filename stars output_dir =
       (Filename.basename filename) (Printexc.to_string e)
 
 (* Generate summary visualization (e.g., histogram of star counts) *)
-and generate_summary_visualization results output_dir =
+let generate_summary_visualization results output_dir =
   (* Create histogram of star counts *)
-  let star_counts = List.map (fun (_, (_, _, stars)) -> List.length stars) results in
+  let star_counts = List.map (fun (_, _, stars) -> List.length stars) results in
   
   (* Simple text-based histogram for now *)
   let hist_path = Filename.concat output_dir "star_count_histogram.txt" in
@@ -106,7 +106,7 @@ and generate_summary_visualization results output_dir =
   
   (* Create bins *)
   let bin_count = 20 in
-  let bin_size = (max_count - min_count + 1) / bin_count in
+  let bin_size = max 1 ((max_count - min_count + 1) / bin_count) in
   let bins = Array.make bin_count 0 in
   
   (* Fill bins *)
@@ -124,9 +124,7 @@ and generate_summary_visualization results output_dir =
     let bin_start = min_count + i * bin_size in
     let bin_end = bin_start + bin_size - 1 in
     fprintf oc "%4d-%-4d | " bin_start bin_end;
-    for j = 1 to bins.(i) do
-      fprintf oc "#"
-    done;
+    output_string oc (String.make bins.(i) '#');
     fprintf oc " (%d)\n" bins.(i)
   done;
   
@@ -267,7 +265,7 @@ let main () =
   ) files results;
   
   (* Calculate some aggregate statistics *)
-  let total_stars = List.fold_left (fun acc (_, stats, stars) -> 
+  let total_stars = List.fold_left (fun acc (_, _, stars) -> 
     acc + List.length stars
   ) 0 results in
   
