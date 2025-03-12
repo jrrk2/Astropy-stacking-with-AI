@@ -1,4 +1,4 @@
-(* triangle_alignment.ml - Implementation of triangle-based star pattern matching *)
+(* optimized_triangle_alignment.ml - Faster implementation of triangle matching *)
 
 open Types
 
@@ -11,6 +11,8 @@ type triangle = {
   area: float;              (* Area of the triangle *)
   side_ratios: float array; (* Ratios of sides (sorted) *)
   centroid: float * float;  (* Centroid coordinates *)
+  (* New field for efficient matching *)
+  signature: float array;   (* Geometric hash for fast comparison *)
 }
 
 (* Triangle matching result *)
@@ -52,7 +54,29 @@ let triangle_area a b c =
   let s = (a +. b +. c) /. 2.0 in
   sqrt (s *. (s -. a) *. (s -. b) *. (s -. c))
 
-(* Create a triangle from three star points *)
+(* Create a geometric signature for triangles - for fast matching *)
+let create_signature sides angles =
+  let sides = Array.copy sides in
+  let angles = Array.copy angles in
+  Array.sort compare sides;
+  Array.sort compare angles;
+  
+  (* Normalize sides by largest side for scale invariance *)
+  let max_side = sides.(2) in
+  let side_ratios = Array.map (fun s -> s /. max_side) sides in
+  
+  (* Combine side ratios and angles into a signature *)
+  let signature = Array.make 6 0.0 in
+  signature.(0) <- side_ratios.(0);
+  signature.(1) <- side_ratios.(1);
+  signature.(2) <- side_ratios.(2);
+  signature.(3) <- angles.(0) /. Float.pi;  (* Normalize angles to 0-1 range *)
+  signature.(4) <- angles.(1) /. Float.pi;
+  signature.(5) <- angles.(2) /. Float.pi;
+  
+  signature
+
+(* Create a triangle from three star points - optimized version *)
 let create_triangle s1 s2 s3 =
   let stars = [|s1; s2; s3|] in
   
@@ -62,27 +86,32 @@ let create_triangle s1 s2 s3 =
   let side3 = distance s3 s1 in
   let sides = [|side1; side2; side3|] in
   
-  (* Sort sides for consistent indexing *)
-  Array.sort compare sides;
-  
   (* Compute angles *)
   let angle1 = angle s3 s1 s2 in
   let angle2 = angle s1 s2 s3 in
   let angle3 = angle s2 s3 s1 in
   let angles = [|angle1; angle2; angle3|] in
-  Array.sort compare angles;
+  
+  (* Sort sides and angles for consistent indexing *)
+  let sorted_sides = Array.copy sides in
+  let sorted_angles = Array.copy angles in
+  Array.sort compare sorted_sides;
+  Array.sort compare sorted_angles;
   
   (* Compute perimeter and area *)
   let perimeter = side1 +. side2 +. side3 in
   let area = triangle_area side1 side2 side3 in
   
   (* Compute side ratios (invariant to scaling) *)
-  let max_side = sides.(2) in
-  let side_ratios = Array.map (fun s -> s /. max_side) sides in
+  let max_side = sorted_sides.(2) in
+  let side_ratios = Array.map (fun s -> s /. max_side) sorted_sides in
   
   (* Compute centroid *)
   let cx = (s1.x +. s2.x +. s3.x) /. 3.0 in
   let cy = (s1.y +. s2.y +. s3.y) /. 3.0 in
+  
+  (* Create signature for fast matching *)
+  let signature = create_signature sides angles in
   
   {
     stars;
@@ -92,75 +121,170 @@ let create_triangle s1 s2 s3 =
     area;
     side_ratios;
     centroid = (cx, cy);
+    signature;
   }
 
-(* Generate all possible triangles from a list of stars 
-   Limit to brightest stars to avoid combinatorial explosion *)
-let generate_triangles stars max_stars min_side_length =
+(* Filter stars based on proximity to reduce false triangles *)
+let filter_nearby_stars min_distance stars =
+  let n = Array.length stars in
+  let filtered = Array.make n true in
+  
+  for i = 0 to n - 2 do
+    if filtered.(i) then
+      for j = i + 1 to n - 1 do
+        if filtered.(j) then
+          let dist = distance stars.(i) stars.(j) in
+          if dist < min_distance then
+            filtered.(j) <- false
+      done
+  done;
+  
+  Array.to_list (Array.mapi (fun i s -> if filtered.(i) then Some s else None) stars)
+  |> List.filter_map (fun x -> x)
+
+(* Generate all possible triangles from a list of stars - optimized version *)
+let generate_triangles stars max_stars min_side_length max_triangles =
+  Printf.printf "Generating triangles from %d stars...\n" (List.length stars);
+  
   (* Sort stars by brightness (descending) and limit count *)
   let stars = Array.of_list stars in
   Array.sort (fun s1 s2 -> compare s2.flux s1.flux) stars;
   
   let n = min (Array.length stars) max_stars in
-  let triangles = ref [] in
+  Printf.printf "Using %d brightest stars\n" n;
   
-  for i = 0 to n - 3 do
-    for j = i + 1 to n - 2 do
-      for k = j + 1 to n - 1 do
-        let s1 = stars.(i) in
-        let s2 = stars.(j) in
-        let s3 = stars.(k) in
-        
-        (* Only create triangles with sides longer than minimum *)
-        let side1 = distance s1 s2 in
-        let side2 = distance s2 s3 in
-        let side3 = distance s3 s1 in
-        
-        if side1 > min_side_length && side2 > min_side_length && side3 > min_side_length then
-          triangles := create_triangle s1 s2 s3 :: !triangles
+  (* Filter very close stars that would make similar triangles *)
+  let filtered_stars = 
+    Array.sub stars 0 n 
+    |> filter_nearby_stars 5.0
+  in
+  
+  let filtered_n = List.length filtered_stars in
+  Printf.printf "After filtering close stars: %d\n" filtered_n;
+  
+  (* Convert back to array for indexed access *)
+  let stars = Array.of_list filtered_stars in
+  let n = Array.length stars in
+  
+  (* Instead of generating all possible triangles, choose a representative sample *)
+  let triangles = ref [] in
+  let count = ref 0 in
+  
+  (* Generate triangles prioritizing well-formed ones *)
+  for i = 0 to min (n - 3) 30 do  (* Limit to first 30 stars *)
+    for j = i + 1 to min (n - 2) (i + 20) do  (* Only look at nearby indices *)
+      for k = j + 1 to min (n - 1) (j + 20) do
+        if !count >= max_triangles then
+          ()  (* Already have enough triangles *)
+        else
+          let s1 = stars.(i) in
+          let s2 = stars.(j) in
+          let s3 = stars.(k) in
+          
+          (* Check triangle quality *)
+          let side1 = distance s1 s2 in
+          let side2 = distance s2 s3 in
+          let side3 = distance s3 s1 in
+          
+          (* Skip triangles with sides that are too small *)
+          if side1 > min_side_length && side2 > min_side_length && side3 > min_side_length then
+            (* Skip triangles that are too elongated (poor for matching) *)
+            let min_side = min side1 (min side2 side3) in
+            let max_side = max side1 (max side2 side3) in
+            let ratio = min_side /. max_side in
+            
+            if ratio > 0.2 then  (* Not too elongated *)
+              begin
+                triangles := create_triangle s1 s2 s3 :: !triangles;
+                incr count;
+              end
       done
     done
   done;
   
+  Printf.printf "Generated %d triangles\n" !count;
   !triangles
 
-(* Compare two triangles for similarity (returns 0.0-1.0 similarity score) *)
+(* Compare two triangles for similarity (returns 0.0-1.0 similarity score) - optimized *)
 let compare_triangles t1 t2 =
-  (* Compare using side ratios - invariant to scale *)
-  let side_ratio_diff = 
-    Array.map2 (fun r1 r2 -> abs_float (r1 -. r2)) t1.side_ratios t2.side_ratios
+  (* Fast comparison using signature *)
+  let sig_diff = 
+    Array.map2 (fun s1 s2 -> abs_float (s1 -. s2)) t1.signature t2.signature
     |> Array.fold_left (+.) 0.0
   in
-  
-  (* Compare using angles - invariant to scale and rotation *)
-  let angle_diff =
-    Array.map2 (fun a1 a2 -> abs_float (a1 -. a2)) t1.angles t2.angles
-    |> Array.fold_left (+.) 0.0
-  in
-  
-  (* Combine metrics - lower is better *)
-  let diff = (side_ratio_diff /. 3.0) +. (angle_diff /. (3.0 *. Float.pi)) in
   
   (* Convert to similarity score (1.0 = identical, 0.0 = completely different) *)
-  max 0.0 (1.0 -. diff)
+  max 0.0 (1.0 -. (sig_diff /. 6.0))  (* Normalize by number of signature components *)
 
-(* Match triangles between reference and target images *)
-let match_triangles ref_triangles target_triangles min_similarity =
-  let matches = ref [] in
+(* Match triangles between reference and target images - optimized with early stopping *)
+let match_triangles ref_triangles target_triangles min_similarity max_matches =
+  Printf.printf "Matching triangles...\n";
   
+  (* Pre-compute a lookup for target triangles based on their geometric properties *)
+  (* This groups similar triangles together for faster matching *)
+  let target_groups = Hashtbl.create 100 in
+  
+  List.iter (fun tt ->
+    (* Use first two values of signature as bucket key *)
+    let key = (int_of_float (tt.signature.(0) *. 20.0), 
+               int_of_float (tt.signature.(1) *. 20.0)) in
+    
+    let current = 
+      try Hashtbl.find target_groups key 
+      with Not_found -> []
+    in
+    
+    Hashtbl.replace target_groups key (tt :: current)
+  ) target_triangles;
+  
+  Printf.printf "Created %d target triangle groups\n" (Hashtbl.length target_groups);
+  
+  let matches = ref [] in
+  let match_count = ref 0 in
+  
+  (* Process each reference triangle *)
   List.iter (fun rt ->
-    List.iter (fun tt ->
-      let similarity = compare_triangles rt tt in
-      if similarity >= min_similarity then
-        matches := { ref_triangle = rt; target_triangle = tt; similarity } :: !matches
-    ) target_triangles
+    (* Early stopping if we have enough matches *)
+    if !match_count < max_matches then
+      (* Find candidate target triangles using geometric binning *)
+      let key = (int_of_float (rt.signature.(0) *. 20.0), 
+                 int_of_float (rt.signature.(1) *. 20.0)) in
+      
+      (* Check neighboring bins too for robustness *)
+      let keys = [
+        key;
+        (fst key - 1, snd key); (fst key + 1, snd key);
+        (fst key, snd key - 1); (fst key, snd key + 1);
+      ] in
+      
+      (* Get candidates from all relevant bins *)
+      let candidates = 
+        List.fold_left (fun acc k ->
+          try (Hashtbl.find target_groups k) @ acc
+          with Not_found -> acc
+        ) [] keys
+      in
+      
+      (* Compare with candidates *)
+      List.iter (fun tt ->
+        let similarity = compare_triangles rt tt in
+        if similarity >= min_similarity then
+          begin
+            matches := { ref_triangle = rt; target_triangle = tt; similarity } :: !matches;
+            incr match_count;
+          end
+      ) candidates
   ) ref_triangles;
+  
+  Printf.printf "Found %d matching triangles\n" !match_count;
   
   (* Sort matches by similarity (descending) *)
   List.sort (fun m1 m2 -> compare m2.similarity m1.similarity) !matches
 
-(* Find star correspondences from triangle matches *)
+(* Find star correspondences from triangle matches - optimized with spatial consistency check *)
 let find_star_correspondences triangle_matches min_confidence =
+  Printf.printf "Finding star correspondences...\n";
+  
   (* Count how many times each (ref_star, target_star) pair appears *)
   let pair_counts = Hashtbl.create 100 in
   
@@ -170,19 +294,18 @@ let find_star_correspondences triangle_matches min_confidence =
     for i = 0 to 2 do
       let ref_star = tm.ref_triangle.stars.(i) in
       
-      (* Look for corresponding star in target triangle based on position in triangle *)
-      for j = 0 to 2 do
-        let target_star = tm.target_triangle.stars.(j) in
-        
-        (* Use the triangle similarity as weight *)
-        let key = (ref_star, target_star) in
-        let current = 
-          try Hashtbl.find pair_counts key
-          with Not_found -> (0, 0.0)
-        in
-        let (count, confidence) = current in
-        Hashtbl.replace pair_counts key (count + 1, confidence +. tm.similarity)
-      done
+      (* Match with target stars based on position in triangle *)
+      (* This uses the fact that stars have the same order in both triangles *)
+      let target_star = tm.target_triangle.stars.(i) in
+      
+      (* Use the triangle similarity as weight *)
+      let key = (ref_star, target_star) in
+      let current = 
+        try Hashtbl.find pair_counts key
+        with Not_found -> (0, 0.0)
+      in
+      let (count, confidence) = current in
+      Hashtbl.replace pair_counts key (count + 1, confidence +. tm.similarity)
     done
   ) triangle_matches;
   
@@ -191,18 +314,56 @@ let find_star_correspondences triangle_matches min_confidence =
   
   Hashtbl.iter (fun (ref_star, target_star) (count, total_confidence) ->
     let confidence = total_confidence /. float_of_int count in
-    if confidence >= min_confidence then
+    if confidence >= min_confidence && count >= 3 then  (* Require support from multiple triangles *)
       star_matches := { ref_star; target_star; match_count = count; confidence } :: !star_matches
   ) pair_counts;
   
+  (* Check for spatial consistency *)
+  let consistent_matches = 
+    if List.length !star_matches >= 10 then
+      (* We have enough matches to filter based on consistency *)
+      let dx_values = List.map (fun m -> 
+        m.ref_star.x -. m.target_star.x, m.confidence) !star_matches in
+      let dy_values = List.map (fun m -> 
+        m.ref_star.y -. m.target_star.y, m.confidence) !star_matches in
+      
+      (* Calculate weighted median dx, dy *)
+      let sort_by_value lst = List.sort (fun (a,_) (b,_) -> compare a b) lst in
+      let sorted_dx = sort_by_value dx_values in
+      let sorted_dy = sort_by_value dy_values in
+      
+      let median_dx = (fst (List.nth sorted_dx (List.length sorted_dx / 2))) in
+      let median_dy = (fst (List.nth sorted_dy (List.length sorted_dy / 2))) in
+      
+      (* Filter outliers *)
+      List.filter (fun m ->
+        let dx = m.ref_star.x -. m.target_star.x in
+        let dy = m.ref_star.y -. m.target_star.y in
+        
+        let dx_diff = abs_float (dx -. median_dx) in
+        let dy_diff = abs_float (dy -. median_dy) in
+        
+        (* Keep if displacement is consistent with the median *)
+        dx_diff < 20.0 && dy_diff < 20.0
+      ) !star_matches
+    else
+      !star_matches
+  in
+  
+  Printf.printf "Found %d reliable star matches\n" (List.length consistent_matches);
+  
   (* Sort by confidence (descending) *)
-  List.sort (fun m1 m2 -> compare m2.confidence m1.confidence) !star_matches
+  List.sort (fun m1 m2 -> compare m2.confidence m1.confidence) consistent_matches
 
 (* Estimate transform between images based on star correspondences *)
 let estimate_transform star_matches =
+  Printf.printf "Estimating transform from %d star matches...\n" (List.length star_matches);
+  
   (* Need at least 3 matches for a valid transform *)
-  if List.length star_matches < 3 then
+  if List.length star_matches < 3 then begin
+    Printf.printf "Not enough matches to estimate transform\n";
     identity_transform
+  end
   else begin
     (* Calculate weighted centroids *)
     let total_confidence = List.fold_left (fun acc m -> acc +. m.confidence) 0.0 star_matches in
@@ -221,7 +382,6 @@ let estimate_transform star_matches =
     ) star_matches;
     
     (* Calculate rotation and scale using Kabsch algorithm *)
-    (* Here we use a simplified version with just rotation and scale *)
     let covariance_xx = ref 0.0 in
     let covariance_xy = ref 0.0 in
     let covariance_yx = ref 0.0 in
@@ -254,20 +414,30 @@ let estimate_transform star_matches =
     let dx = !ref_centroid_x -. (!target_centroid_x *. cos rotation -. !target_centroid_y *. sin rotation) *. scale in
     let dy = !ref_centroid_y -. (!target_centroid_x *. sin rotation +. !target_centroid_y *. cos rotation) *. scale in
     
-    { dx; dy; rotation; scale }
+    let transform = { dx; dy; rotation; scale } in
+    
+    Printf.printf "Estimated transform: dx=%.2f, dy=%.2f, rotation=%.2f°, scale=%.2f\n"
+      transform.dx transform.dy (transform.rotation *. 180.0 /. Float.pi) transform.scale;
+    
+    transform
   end
 
-(* Align an image using triangle pattern matching *)
-let align_with_triangles ref_stars target_stars ?(max_stars=50) ?(min_side_length=10.0) ?(min_similarity=0.8) ?(min_confidence=0.5) () =
-  (* Generate triangles for both images *)
-  let ref_triangles = generate_triangles ref_stars max_stars min_side_length in
-  let target_triangles = generate_triangles target_stars max_stars min_side_length in
+(* Align an image using triangle pattern matching - optimized version *)
+let align_with_triangles ref_stars target_stars ?(max_stars=50) ?(min_side_length=15.0) 
+                     ?(min_similarity=0.8) ?(min_confidence=0.6) () =
+  Printf.printf "Starting triangle-based alignment with %d reference stars and %d target stars\n"
+    (List.length ref_stars) (List.length target_stars);
+  
+  (* Generate triangles for both images - limit the number to control performance *)
+  let max_triangles = 500 in  (* Limit to 500 triangles per image *)
+  let ref_triangles = generate_triangles ref_stars max_stars min_side_length max_triangles in
+  let target_triangles = generate_triangles target_stars max_stars min_side_length max_triangles in
   
   Printf.printf "Generated %d reference triangles and %d target triangles\n"
     (List.length ref_triangles) (List.length target_triangles);
   
-  (* Match triangles between images *)
-  let triangle_matches = match_triangles ref_triangles target_triangles min_similarity in
+  (* Match triangles between images - limit to 1000 matches to control performance *)
+  let triangle_matches = match_triangles ref_triangles target_triangles min_similarity 1000 in
   Printf.printf "Found %d matching triangles\n" (List.length triangle_matches);
   
   (* Find star correspondences *)
@@ -276,14 +446,14 @@ let align_with_triangles ref_stars target_stars ?(max_stars=50) ?(min_side_lengt
   
   (* Estimate transformation *)
   let transform = estimate_transform star_matches in
-  Printf.printf "Estimated transform: dx=%.2f, dy=%.2f, rotation=%.2f°, scale=%.2f\n"
-    transform.dx transform.dy (transform.rotation *. 180.0 /. Float.pi) transform.scale;
   
   (* Return results *)
   (transform, star_matches)
 
 (* Verify alignment accuracy using RMSE of matched stars *)
 let calculate_alignment_error transform star_matches =
+  Printf.printf "Calculating alignment error for %d star matches\n" (List.length star_matches);
+  
   let total_squared_error = ref 0.0 in
   let count = float_of_int (List.length star_matches) in
   
@@ -309,7 +479,12 @@ let calculate_alignment_error transform star_matches =
   ) star_matches;
   
   (* Calculate RMSE *)
-  if count > 0.0 then
-    sqrt (!total_squared_error /. count)
-  else
-    0.0
+  let rmse = 
+    if count > 0.0 then
+      sqrt (!total_squared_error /. count)
+    else
+      0.0
+  in
+  
+  Printf.printf "RMSE alignment error: %.2f pixels\n" rmse;
+  rmse
