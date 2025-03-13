@@ -30,6 +30,9 @@ detect: _build/default/star_detection_cli.exe
 compare: _build/default/stack_comparison.exe
 	_build/default/stack_comparison.exe -ref 0 -dir rgb
 
+hybrid: _build/default/hybrid_stacking_cli.exe
+	env OCAMLRUNPARAM=b _build/default/hybrid_stacking_cli.exe -v -o stacked.fits solved_verification/cal_*_rgb.fits
+
 shar:
 	(cd _build/default && shar `ls -1 *.ml *.mli | fgrep -v .pp.` > ../../archive.shar.txt)
 
@@ -55,4 +58,7 @@ _build/default/fits_reader_test.exe:
 	dune build $@
 
 _build/default/stack_comparison.exe:
+	dune build $@
+
+_build/default/hybrid_stacking_cli.exe:
 	dune build $@

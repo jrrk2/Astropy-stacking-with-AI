@@ -188,6 +188,44 @@ type rotation_data_item = {
   filename: string;
 }
 
+(* Live stacking coordinates from FITS keywords *)
+type live_stack_coords = {
+  coord_rot: float;
+  coord_x: float;
+  coord_y: float;
+  cor_rot: float;
+  cor_x: float;
+  cor_y: float;
+}
+
+(* Structure to hold alignment results for comparison *)
+type alignment_result = {
+  method_name: string;
+  filename: string;
+  success: bool;
+  reference_stars: rgb_star list;
+  detected_stars: rgb_star list;
+  matched_pairs: (rgb_star * rgb_star) list;
+  transform: alignment_parameters;
+  error_stats: float * float * float;  (* mean, max, stddev *)
+  runtime: float;
+  live_stack_coords: live_stack_coords option;  (* New field for live stacking coordinates *)
+}
+
+(* Structure to hold comparison results *)
+type comparison_result = {
+  filename: string;
+  plate_solve_success: bool;
+  star_align_success: bool;
+  plate_solve_stars: int;
+  star_align_stars: int;
+  plate_solve_error: float;
+  star_align_error: float;
+  runtime_ratio: float;
+  has_live_stack: bool;           (* New field indicating presence of live stack data *)
+  live_stack_error: float option; (* New field for live stack error if available *)
+}
+
 (* Implementation of List.take function *)
 module List = struct
   include List  (* Include all the standard List module functions *)

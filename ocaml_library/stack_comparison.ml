@@ -10,44 +10,6 @@ open Astrometric_alignment
 (* Log levels *)
 type log_level = Debug | Info | Warning | Error
 
-(* Live stacking coordinates from FITS keywords *)
-type live_stack_coords = {
-  coord_rot: float;
-  coord_x: float;
-  coord_y: float;
-  cor_rot: float;
-  cor_x: float;
-  cor_y: float;
-}
-
-(* Structure to hold alignment results for comparison *)
-type alignment_result = {
-  method_name: string;
-  filename: string;
-  success: bool;
-  reference_stars: rgb_star list;
-  detected_stars: rgb_star list;
-  matched_pairs: (rgb_star * rgb_star) list;
-  transform: alignment_parameters;
-  error_stats: float * float * float;  (* mean, max, stddev *)
-  runtime: float;
-  live_stack_coords: live_stack_coords option;  (* New field for live stacking coordinates *)
-}
-
-(* Structure to hold comparison results *)
-type comparison_result = {
-  filename: string;
-  plate_solve_success: bool;
-  star_align_success: bool;
-  plate_solve_stars: int;
-  star_align_stars: int;
-  plate_solve_error: float;
-  star_align_error: float;
-  runtime_ratio: float;
-  has_live_stack: bool;           (* New field indicating presence of live stack data *)
-  live_stack_error: float option; (* New field for live stack error if available *)
-}
-
 (* Configurable debug level *)
 let debug_level = ref Info
 
@@ -62,7 +24,11 @@ let log level msg =
     printf "[%s] %s\n" level_str msg;
     flush stdout
 
-(* Extract live stacking coordinates from FITS header *)
+let debug_coords tag msg =
+  Printf.printf "COORDDEBUG[%s]: %s\n" tag msg;
+  flush stdout
+
+(* In the extract_live_stack_coords function *)
 let extract_live_stack_coords hdrh =
   try
     (* Use safer extraction with explicit error handling for each keyword *)
@@ -90,8 +56,22 @@ let extract_live_stack_coords hdrh =
       try parse_float hdrh "CORY" 
       with _ -> (log Debug "CORY not found"; raise Not_found) in
     
-    log Info (sprintf "Found live stacking data: COORDROT=%.2f, COORDX=%.2f, COORDY=%.2f, CORROT=%.2f, CORX=%.2f, CORY=%.2f" 
-               coord_rot coord_x coord_y cor_rot cor_x cor_y);
+    (* New debug messages *)
+    debug_coords "EXTRACT" (Printf.sprintf "Found live stacking coordinates:");
+    debug_coords "COORDROT" (Printf.sprintf "%.6f degrees" coord_rot);
+    debug_coords "COORDS" (Printf.sprintf "X=%.6f, Y=%.6f (unknown units)" coord_x coord_y);
+    debug_coords "CORRS" (Printf.sprintf "X=%.6f, Y=%.6f (unknown units)" cor_x cor_y);
+    
+    (* Check if we can find any WCS information to determine scale *)
+    let has_wcs = Hashtbl.mem hdrh "CD1_1" && Hashtbl.mem hdrh "CD2_2" in
+    if has_wcs then
+      let cd1_1 = parse_float hdrh "CD1_1" in
+      let cd2_2 = parse_float hdrh "CD2_2" in
+      let scale_deg_per_px = (abs_float cd1_1 +. abs_float cd2_2) /. 2.0 in
+      let scale_arcsec_per_px = scale_deg_per_px *. 3600.0 in
+      debug_coords "WCS" (Printf.sprintf "CD matrix found: scale=%.4f arcsec/pixel" scale_arcsec_per_px)
+    else
+      debug_coords "WCS" "No CD matrix found in header";
                
     Some {
       coord_rot;
@@ -102,7 +82,7 @@ let extract_live_stack_coords hdrh =
       cor_y;
     }
   with e -> 
-    log Debug (sprintf "Failed to extract live stacking data: %s" (Printexc.to_string e));
+    debug_coords "ERROR" (Printf.sprintf "Failed to extract live stacking data: %s" (Printexc.to_string e));
     None
 
 (* Function to detect stars in an image using the star detection module *)
@@ -341,29 +321,101 @@ let align_with_plate_solve reference_file target_file =
     log Error (sprintf "Error in plate solve alignment: %s" (Printexc.to_string e));
     None
 
-(* Function to calculate error between live stack coordinates and alignment results *)
+
+(* In the calculate_live_stack_error function *)
 let calculate_live_stack_error live_coords transform =
   try
+    (* Add debug info about inputs *)
+    debug_coords "COMPARE" "Comparing live stack and transform parameters:";
+    debug_coords "STACK" (Printf.sprintf "CORROT=%.2f°, CORX=%.2f, CORY=%.2f" 
+                            live_coords.cor_rot live_coords.cor_x live_coords.cor_y);
+    debug_coords "TRANSFORM" (Printf.sprintf "rotation=%.2f° (%.4f rad), dx=%.2f px, dy=%.2f px" 
+                               (transform.rotation *. 180.0 /. Float.pi) transform.rotation transform.dx transform.dy);
+    
+    (* Log various scale factor tests *)
+    debug_coords "SCALES" "Testing different scale factors:";
+    List.iter (fun factor ->
+      let scaled_x = live_coords.cor_x /. factor in
+      let scaled_y = live_coords.cor_y /. factor in
+      debug_coords "FACTOR" (Printf.sprintf "With factor %.1f: X=%.4f, Y=%.4f" factor scaled_x scaled_y)
+    ) [1.0; 60.0; 3600.0; 60.0 *. 15.0];
+    
     (* Calculate Euclidean distance between corrections *)
     let dx_diff = live_coords.cor_x -. transform.dx in
     let dy_diff = live_coords.cor_y -. transform.dy in
     let trans_error = sqrt (dx_diff *. dx_diff +. dy_diff *. dy_diff) in
+    debug_coords "RAW_DIFF" (Printf.sprintf "Unscaled differences: dx=%.2f, dy=%.2f, distance=%.2f" 
+                               dx_diff dy_diff trans_error);
+    
+    (* Try common astronomical scale factors *)
+    let scale_factors = [
+      ("none", 1.0);
+      ("arcmin", 60.0);
+      ("arcsec", 3600.0);
+      ("RA hours to deg", 15.0);
+      ("RA min to deg", 15.0 /. 60.0);
+      ("RA sec to deg", 15.0 /. 3600.0);
+    ] in
+    
+    List.iter (fun (name, factor) ->
+      let scaled_x = live_coords.cor_x /. factor in
+      let scaled_y = live_coords.cor_y /. factor in
+      let scaled_dx_diff = scaled_x -. transform.dx in
+      let scaled_dy_diff = scaled_y -. transform.dy in
+      let scaled_error = sqrt (scaled_dx_diff *. scaled_dx_diff +. scaled_dy_diff *. scaled_dy_diff) in
+      debug_coords "SCALED" (Printf.sprintf "If %s (factor %.4f): error=%.2f pixels" 
+                               name factor scaled_error)
+    ) scale_factors;
     
     (* Calculate rotation difference, normalized to range [0, 180] *)
     let rot_diff = abs_float (live_coords.cor_rot -. (transform.rotation *. 180.0 /. Float.pi)) in
     let rot_diff = min rot_diff (360.0 -. rot_diff) in
+    debug_coords "ROT_DIFF" (Printf.sprintf "Rotation difference: %.2f degrees" rot_diff);
     
     (* Combine translational and rotational errors - weighted sum *)
     (* Give more weight to translation error as it's more important for stacking *)
     let combined_error = trans_error +. (rot_diff *. 0.1) in
+    debug_coords "RESULT" (Printf.sprintf "Combined error: %.2f" combined_error);
     
     Some combined_error
-  with _ -> None
+  with e -> 
+    debug_coords "ERROR" (Printf.sprintf "Error calculating live stack error: %s" (Printexc.to_string e));
+    None
+
+let dump_fits_header filename =
+  try
+    let hdrh = just_header filename in
+    debug_coords "HEADER" (Printf.sprintf "Dumping header for %s:" (Filename.basename filename));
+    
+    (* Check for specific keys we're interested in *)
+    let interesting_keys = [
+      "COORDROT="; "COORDX"; "COORDY"; "CORROT"; "CORX"; "CORY";
+      "CD1_1"; "CD1_2"; "CD2_1"; "CD2_2"; "CRPIX1"; "CRPIX2"; "CRVAL1"; "CRVAL2";
+      "CTYPE1"; "CTYPE2"; "CDELT1"; "CDELT2"; "CROTA2";
+      "EQUINOX"; "EPOCH"; "RADECSYS"
+    ] in
+    
+    List.iter (fun key ->
+      match Hashtbl.find_opt hdrh key with
+      | Some value -> debug_coords "HDR_KV" (Printf.sprintf "%s = %s" key value)
+      | None -> debug_coords "HDR_MISSING" (Printf.sprintf "%s not found" key)
+    ) interesting_keys;
+    
+    true
+  with e ->
+    debug_coords "ERROR" (Printf.sprintf "Failed to read header: %s" (Printexc.to_string e));
+    false
 
 (* Function to compare the two methods *)
 let compare_methods reference_file target_file =
   log Info (sprintf "Comparing alignment methods for %s to %s" 
     (Filename.basename target_file) (Filename.basename reference_file));
+
+  (* Add header dumps for both files *)
+  debug_coords "FILEINFO" (sprintf "Reference file: %s" reference_file);
+  let _ = dump_fits_header reference_file in
+  debug_coords "FILEINFO" (sprintf "Target file: %s" target_file);
+  let _ = dump_fits_header target_file in
     
   let star_threshold = 3.0 in
   let max_stars = 50 in
