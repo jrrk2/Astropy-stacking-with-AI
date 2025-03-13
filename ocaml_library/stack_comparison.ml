@@ -10,6 +10,16 @@ open Astrometric_alignment
 (* Log levels *)
 type log_level = Debug | Info | Warning | Error
 
+(* Live stacking coordinates from FITS keywords *)
+type live_stack_coords = {
+  coord_rot: float;
+  coord_x: float;
+  coord_y: float;
+  cor_rot: float;
+  cor_x: float;
+  cor_y: float;
+}
+
 (* Structure to hold alignment results for comparison *)
 type alignment_result = {
   method_name: string;
@@ -21,6 +31,7 @@ type alignment_result = {
   transform: alignment_parameters;
   error_stats: float * float * float;  (* mean, max, stddev *)
   runtime: float;
+  live_stack_coords: live_stack_coords option;  (* New field for live stacking coordinates *)
 }
 
 (* Structure to hold comparison results *)
@@ -33,17 +44,66 @@ type comparison_result = {
   plate_solve_error: float;
   star_align_error: float;
   runtime_ratio: float;
+  has_live_stack: bool;           (* New field indicating presence of live stack data *)
+  live_stack_error: float option; (* New field for live stack error if available *)
 }
 
+(* Configurable debug level *)
+let debug_level = ref Info
+
 let log level msg =
-  let level_str = match level with
-    | Debug -> "DEBUG"
-    | Info -> "INFO"
-    | Warning -> "WARNING"
-    | Error -> "ERROR"
-  in
-  printf "[%s] %s\n" level_str msg;
-  flush stdout
+  if level >= !debug_level then 
+    let level_str = match level with
+      | Debug -> "DEBUG"
+      | Info -> "INFO"
+      | Warning -> "WARNING"
+      | Error -> "ERROR"
+    in
+    printf "[%s] %s\n" level_str msg;
+    flush stdout
+
+(* Extract live stacking coordinates from FITS header *)
+let extract_live_stack_coords hdrh =
+  try
+    (* Use safer extraction with explicit error handling for each keyword *)
+    let coord_rot = 
+      try parse_float hdrh "COORDROT=" 
+      with _ -> (log Debug "COORDROT not found"; raise Not_found) in
+      
+    let coord_x = 
+      try parse_float hdrh "COORDX" 
+      with _ -> (log Debug "COORDX not found"; raise Not_found) in
+      
+    let coord_y = 
+      try parse_float hdrh "COORDY" 
+      with _ -> (log Debug "COORDY not found"; raise Not_found) in
+      
+    let cor_rot = 
+      try parse_float hdrh "CORROT" 
+      with _ -> (log Debug "CORROT not found"; raise Not_found) in
+      
+    let cor_x = 
+      try parse_float hdrh "CORX" 
+      with _ -> (log Debug "CORX not found"; raise Not_found) in
+      
+    let cor_y = 
+      try parse_float hdrh "CORY" 
+      with _ -> (log Debug "CORY not found"; raise Not_found) in
+    
+    log Info (sprintf "Found live stacking data: COORDROT=%.2f, COORDX=%.2f, COORDY=%.2f, CORROT=%.2f, CORX=%.2f, CORY=%.2f" 
+               coord_rot coord_x coord_y cor_rot cor_x cor_y);
+               
+    Some {
+      coord_rot;
+      coord_x;
+      coord_y;
+      cor_rot;
+      cor_x;
+      cor_y;
+    }
+  with e -> 
+    log Debug (sprintf "Failed to extract live stacking data: %s" (Printexc.to_string e));
+    None
 
 (* Function to detect stars in an image using the star detection module *)
 let detect_stars filename threshold =
@@ -72,31 +132,40 @@ let align_with_stars reference_file target_file _threshold _max_stars =
   log Info (sprintf "Aligning %s to %s using RGB star pattern matching" 
     (Filename.basename target_file) (Filename.basename reference_file));
   
-  match Rgb_star_alignment.align_rgb_images reference_file target_file ~debug:true () with
-  | Some (transform, matches, error, align_time) ->
-      (* Convert matches to the format expected by the comparison framework *)
-      let matched_pairs = List.map (fun m -> 
-        ({ x = m.ref_star.x; y = m.ref_star.y; flux = m.ref_star.flux; fwhm = m.ref_star.fwhm; r=m.ref_star.r; g=m.ref_star.g; b=m.ref_star.b },
-         { x = m.target_star.x; y = m.target_star.y; flux = m.target_star.flux; fwhm = m.target_star.fwhm; r=m.ref_star.r; g=m.ref_star.g; b=m.ref_star.b })
-      ) matches in
-      
-      let result = {
-        method_name = "rgb_star_alignment";
-        filename = target_file;
-        success = true;
-        reference_stars = List.map (fun (ref_star, _) -> ref_star) matched_pairs;
-        detected_stars = List.map (fun (_, target_star) -> target_star) matched_pairs;
-        matched_pairs;
-        transform;
-        error_stats = (error, error *. 1.5, error /. 2.0);  (* mean, max, stddev estimates *)
-        runtime = align_time;
-      } in
-      
-      Some result
-      
-  | None ->
-      log Error "RGB star alignment failed";
-      None
+  try
+    (* Extract live stacking coordinates from the target file *)
+    let target_hdrh = just_header target_file in
+    let live_stack_coords = extract_live_stack_coords target_hdrh in
+    
+    match Rgb_star_alignment.align_rgb_images reference_file target_file ~debug:true () with
+    | Some (transform, matches, error, align_time) ->
+        (* Convert matches to the format expected by the comparison framework *)
+        let matched_pairs = List.map (fun m -> 
+          ({ x = m.ref_star.x; y = m.ref_star.y; flux = m.ref_star.flux; fwhm = m.ref_star.fwhm; r=m.ref_star.r; g=m.ref_star.g; b=m.ref_star.b },
+           { x = m.target_star.x; y = m.target_star.y; flux = m.target_star.flux; fwhm = m.target_star.fwhm; r=m.target_star.r; g=m.target_star.g; b=m.target_star.b })
+        ) matches in
+        
+        let result = {
+          method_name = "rgb_star_alignment";
+          filename = target_file;
+          success = true;
+          reference_stars = List.map (fun (ref_star, _) -> ref_star) matched_pairs;
+          detected_stars = List.map (fun (_, target_star) -> target_star) matched_pairs;
+          matched_pairs;
+          transform;
+          error_stats = (error, error *. 1.5, error /. 2.0);  (* mean, max, stddev estimates *)
+          runtime = align_time;
+          live_stack_coords;
+        } in
+        
+        Some result
+        
+    | None ->
+        log Error "RGB star alignment failed";
+        None
+  with e ->
+    log Error (sprintf "Error in star alignment: %s" (Printexc.to_string e));
+    None
 
 (* Helper function for WCS-based alignment *)
 let align_with_wcs ref_hdrh target_hdrh reference_file target_file start_time =
@@ -104,6 +173,9 @@ let align_with_wcs ref_hdrh target_hdrh reference_file target_file start_time =
     (* Extract WCS information *)
     let ref_wcs = extract_wcs_params ref_hdrh in
     let target_wcs = extract_wcs_params target_hdrh in
+    
+    (* Extract live stacking coordinates *)
+    let live_stack_coords = extract_live_stack_coords target_hdrh in
     
     (match ref_wcs, target_wcs with
     | Some ref_wcs, Some target_wcs ->
@@ -208,6 +280,7 @@ let align_with_wcs ref_hdrh target_hdrh reference_file target_file start_time =
           transform;
           error_stats = (mean_error, max_error, stddev);
           runtime = end_time -. start_time;
+          live_stack_coords;
         } in
         
         Some result
@@ -268,6 +341,25 @@ let align_with_plate_solve reference_file target_file =
     log Error (sprintf "Error in plate solve alignment: %s" (Printexc.to_string e));
     None
 
+(* Function to calculate error between live stack coordinates and alignment results *)
+let calculate_live_stack_error live_coords transform =
+  try
+    (* Calculate Euclidean distance between corrections *)
+    let dx_diff = live_coords.cor_x -. transform.dx in
+    let dy_diff = live_coords.cor_y -. transform.dy in
+    let trans_error = sqrt (dx_diff *. dx_diff +. dy_diff *. dy_diff) in
+    
+    (* Calculate rotation difference, normalized to range [0, 180] *)
+    let rot_diff = abs_float (live_coords.cor_rot -. (transform.rotation *. 180.0 /. Float.pi)) in
+    let rot_diff = min rot_diff (360.0 -. rot_diff) in
+    
+    (* Combine translational and rotational errors - weighted sum *)
+    (* Give more weight to translation error as it's more important for stacking *)
+    let combined_error = trans_error +. (rot_diff *. 0.1) in
+    
+    Some combined_error
+  with _ -> None
+
 (* Function to compare the two methods *)
 let compare_methods reference_file target_file =
   log Info (sprintf "Comparing alignment methods for %s to %s" 
@@ -284,6 +376,29 @@ let compare_methods reference_file target_file =
       let (plate_mean, _, _) = plate.error_stats in
       let (star_mean, _, _) = star.error_stats in
       
+      (* Compare with live stacking coordinates if available *)
+      let has_live_stack = 
+        plate.live_stack_coords <> None || star.live_stack_coords <> None 
+      in
+      
+      let live_stack_coords = 
+        match plate.live_stack_coords, star.live_stack_coords with
+        | Some coords, _ -> Some coords
+        | _, Some coords -> Some coords
+        | None, None -> None
+      in
+      
+      let live_stack_error =
+        match live_stack_coords with
+        | Some coords ->
+            (* Calculate error between live stack coordinates and best alignment method *)
+            let best_transform = 
+              if plate_mean < star_mean then plate.transform else star.transform 
+            in
+            calculate_live_stack_error coords best_transform
+        | None -> None
+      in
+      
       let comparison = {
         filename = Filename.basename target_file;
         plate_solve_success = plate.success;
@@ -293,6 +408,8 @@ let compare_methods reference_file target_file =
         plate_solve_error = plate_mean;
         star_align_error = star_mean;
         runtime_ratio = plate.runtime /. star.runtime;
+        has_live_stack;
+        live_stack_error;
       } in
       
       log Info "\nComparison Results:";
@@ -305,6 +422,16 @@ let compare_methods reference_file target_file =
       log Info (sprintf "Plate solve error: %.2f pixels" comparison.plate_solve_error);
       log Info (sprintf "Star alignment error: %.2f pixels" comparison.star_align_error);
       log Info (sprintf "Runtime ratio (plate/star): %.2fx" comparison.runtime_ratio);
+      
+      (* Add live stack information to log if available *)
+      if has_live_stack then begin
+        log Info "Live stacking coordinates present";
+        match live_stack_error with
+        | Some error ->
+            log Info (sprintf "Live stack error: %.2f" error)
+        | None ->
+            log Info "Could not calculate live stack error"
+      end;
       
       let winner = 
         if not plate.success then "Star alignment (plate solve failed)"
@@ -320,6 +447,14 @@ let compare_methods reference_file target_file =
       log Info "\nOnly plate solving succeeded";
       let (mean, _, _) = plate.error_stats in
       
+      (* Check for live stack coordinates *)
+      let has_live_stack = plate.live_stack_coords <> None in
+      let live_stack_error = 
+        match plate.live_stack_coords with
+        | Some coords -> calculate_live_stack_error coords plate.transform
+        | None -> None
+      in
+      
       let comparison = {
         filename = Filename.basename target_file;
         plate_solve_success = plate.success;
@@ -329,15 +464,35 @@ let compare_methods reference_file target_file =
         plate_solve_error = mean;
         star_align_error = 0.0;
         runtime_ratio = 0.0;  (* N/A *)
+        has_live_stack;
+        live_stack_error;
       } in
       
       log Info (sprintf "Plate solve error: %.2f pixels" comparison.plate_solve_error);
+      
+      if has_live_stack then begin
+        log Info "Live stacking coordinates present";
+        match live_stack_error with
+        | Some error ->
+            log Info (sprintf "Live stack error: %.2f" error)
+        | None ->
+            log Info "Could not calculate live stack error"
+      end;
+      
       log Info "Winner: Plate solving (star alignment failed)";
       Some comparison
       
   | None, Some star ->
       log Info "\nOnly star alignment succeeded";
       let (mean, _, _) = star.error_stats in
+      
+      (* Check for live stack coordinates *)
+      let has_live_stack = star.live_stack_coords <> None in
+      let live_stack_error = 
+        match star.live_stack_coords with
+        | Some coords -> calculate_live_stack_error coords star.transform
+        | None -> None
+      in
       
       let comparison = {
         filename = Filename.basename target_file;
@@ -348,9 +503,21 @@ let compare_methods reference_file target_file =
         plate_solve_error = 0.0;
         star_align_error = mean;
         runtime_ratio = 0.0;  (* N/A *)
+        has_live_stack;
+        live_stack_error;
       } in
       
       log Info (sprintf "Star alignment error: %.2f pixels" comparison.star_align_error);
+      
+      if has_live_stack then begin
+        log Info "Live stacking coordinates present";
+        match live_stack_error with
+        | Some error ->
+            log Info (sprintf "Live stack error: %.2f" error)
+        | None ->
+            log Info "Could not calculate live stack error"
+      end;
+      
       log Info "Winner: Star alignment (plate solve failed)";
       Some comparison
       
@@ -399,7 +566,8 @@ let process_directory reference_file_index image_dir output_dir =
   (* Write CSV results *)
   let csv = open_out csv_path in
   fprintf csv "Filename,PlateSolveSuccess,StarAlignSuccess,PlateSolveStars,";
-  fprintf csv "StarAlignStars,PlateSolveError,StarAlignError,RuntimeRatio,Winner\n";
+  fprintf csv "StarAlignStars,PlateSolveError,StarAlignError,RuntimeRatio,";
+  fprintf csv "HasLiveStack,LiveStackError,Winner\n";
   
   List.iter (fun r ->
     let winner = 
@@ -409,7 +577,7 @@ let process_directory reference_file_index image_dir output_dir =
       else "Star"
     in
     
-    fprintf csv "%s,%b,%b,%d,%d,%.2f,%.2f,%.2f,%s\n"
+    fprintf csv "%s,%b,%b,%d,%d,%.2f,%.2f,%.2f,%b,%s,%s\n"
       r.filename
       r.plate_solve_success
       r.star_align_success
@@ -418,6 +586,8 @@ let process_directory reference_file_index image_dir output_dir =
       r.plate_solve_error
       r.star_align_error
       r.runtime_ratio
+      r.has_live_stack
+      (match r.live_stack_error with Some e -> sprintf "%.2f" e | None -> "N/A")
       winner
   ) results;
   
@@ -438,6 +608,7 @@ let process_directory reference_file_index image_dir output_dir =
   fprintf html "th { background-color: #4CAF50; color: white; }\n";
   fprintf html ".plate { color: blue; }\n";
   fprintf html ".star { color: green; }\n";
+  fprintf html ".live { color: purple; }\n";
   fprintf html ".failed { color: red; }\n";
   fprintf html ".summary { margin: 20px 0; }\n";
   fprintf html ".summary-item { margin: 10px 0; }\n";
@@ -468,6 +639,8 @@ let process_directory reference_file_index image_dir output_dir =
     if r.star_align_success then Some r.star_align_error else None
   ) results in
   
+  let live_stack_errors = List.filter_map (fun r -> r.live_stack_error) results in
+  
   let avg_plate_error = 
     if List.length plate_errors > 0 then
       List.fold_left (+.) 0.0 plate_errors /. float_of_int (List.length plate_errors)
@@ -477,6 +650,12 @@ let process_directory reference_file_index image_dir output_dir =
   let avg_star_error = 
     if List.length star_errors > 0 then
       List.fold_left (+.) 0.0 star_errors /. float_of_int (List.length star_errors)
+    else 0.0
+  in
+  
+  let avg_live_stack_error =
+    if List.length live_stack_errors > 0 then
+      List.fold_left (+.) 0.0 live_stack_errors /. float_of_int (List.length live_stack_errors)
     else 0.0
   in
   
@@ -491,6 +670,9 @@ let process_directory reference_file_index image_dir output_dir =
     else 0.0
   in
   
+  (* Count files with live stacking data *)
+  let live_stack_files = List.filter (fun r -> r.has_live_stack) results |> List.length in
+  
   (* Print summary *)
   fprintf html "<div class='summary'>\n";
   fprintf html "<h2>Summary</h2>\n";
@@ -501,11 +683,18 @@ let process_directory reference_file_index image_dir output_dir =
     star_successes (float_of_int star_successes *. 100.0 /. float_of_int total_files);
   fprintf html "<div class='summary-item'>Both methods successful: <strong>%d</strong> (%.1f%%)</div>\n" 
     both_successes (float_of_int both_successes *. 100.0 /. float_of_int total_files);
+  fprintf html "<div class='summary-item'>Images with live stacking data: <strong>%d</strong> (%.1f%%)</div>\n"
+    live_stack_files (float_of_int live_stack_files *. 100.0 /. float_of_int total_files);
     
   fprintf html "<div class='summary-item'>Average plate solve error: <strong>%.2f</strong> pixels</div>\n" 
     avg_plate_error;
   fprintf html "<div class='summary-item'>Average star alignment error: <strong>%.2f</strong> pixels</div>\n" 
     avg_star_error;
+  
+  if List.length live_stack_errors > 0 then
+    fprintf html "<div class='summary-item'>Average live stack error: <strong>%.2f</strong></div>\n" 
+      avg_live_stack_error;
+
   fprintf html "<div class='summary-item'>Average runtime ratio (plate/star): <strong>%.2fx</strong></div>\n" 
     avg_runtime_ratio;
     
@@ -520,7 +709,8 @@ let process_directory reference_file_index image_dir output_dir =
   fprintf html "<table>\n";
   fprintf html "<tr><th>Filename</th><th>Plate Solve</th><th>Star Align</th>";
   fprintf html "<th>Plate Stars</th><th>Star Matches</th><th>Plate Error</th>";
-  fprintf html "<th>Star Error</th><th>Runtime Ratio</th><th>Winner</th></tr>\n";
+  fprintf html "<th>Star Error</th><th>Live Stack Data</th><th>Live Stack Error</th>";
+  fprintf html "<th>Runtime Ratio</th><th>Winner</th></tr>\n";
   
   List.iter (fun r ->
     let winner = 
@@ -542,6 +732,13 @@ let process_directory reference_file_index image_dir output_dir =
     fprintf html "  <td>%d</td>\n" r.star_align_stars;
     fprintf html "  <td>%.2f</td>\n" r.plate_solve_error;
     fprintf html "  <td>%.2f</td>\n" r.star_align_error;
+    fprintf html "  <td class='%s'>%s</td>\n"
+      (if r.has_live_stack then "live" else "")
+      (if r.has_live_stack then "Present" else "None");
+    fprintf html "  <td>%s</td>\n" 
+      (match r.live_stack_error with 
+       | Some err -> sprintf "%.2f" err 
+       | None -> "N/A");
     fprintf html "  <td>%.2fx</td>\n" r.runtime_ratio;
     fprintf html "  <td class='%s'>%s</td>\n"
       (String.lowercase_ascii winner)
@@ -550,13 +747,70 @@ let process_directory reference_file_index image_dir output_dir =
   ) results;
   
   fprintf html "</table>\n";
+  
+  (* Live stacking comparison section *)
+  if live_stack_files > 0 then begin
+    fprintf html "<h2>Live Stacking Analysis</h2>\n";
+    fprintf html "<p>This section compares telescope live stacking with the other alignment methods.</p>\n";
+    
+    (* Create comparison table for items with live stacking data *)
+    fprintf html "<table>\n";
+    fprintf html "<tr><th>Filename</th><th>Live Stack vs. Plate Solve</th><th>Live Stack vs. Star Align</th>";
+    fprintf html "<th>Best Match</th></tr>\n";
+    
+    List.iter (fun r ->
+      if r.has_live_stack then begin
+        let plate_diff = 
+          if r.plate_solve_success && r.live_stack_error <> None then
+            sprintf "%.2f pixels" (Option.get r.live_stack_error)
+          else
+            "N/A"
+        in
+        
+        let star_diff = 
+          if r.star_align_success && r.live_stack_error <> None then
+            sprintf "%.2f pixels" (Option.get r.live_stack_error)
+          else
+            "N/A"
+        in
+        
+        let best_match = 
+          if not r.plate_solve_success then "Star Alignment"
+          else if not r.star_align_success then "Plate Solving"
+          else if r.plate_solve_error < r.star_align_error then "Plate Solving"
+          else "Star Alignment"
+        in
+        
+        fprintf html "<tr>\n";
+        fprintf html "  <td>%s</td>\n" r.filename;
+        fprintf html "  <td>%s</td>\n" plate_diff;
+        fprintf html "  <td>%s</td>\n" star_diff;
+        fprintf html "  <td>%s</td>\n" best_match;
+        fprintf html "</tr>\n";
+      end
+    ) results;
+    
+    fprintf html "</table>\n";
+    
+    (* Add comparison chart placeholder - in a real implementation, you might generate a chart here *)
+    fprintf html "<div style='margin-top: 20px;'>\n";
+    fprintf html "  <h3>Error Comparison</h3>\n";
+    fprintf html "  <p>Average errors:</p>\n";
+    fprintf html "  <ul>\n";
+    fprintf html "    <li>Plate Solve: %.2f pixels</li>\n" avg_plate_error;
+    fprintf html "    <li>Star Alignment: %.2f pixels</li>\n" avg_star_error;
+    fprintf html "    <li>Live Stack Difference: %.2f</li>\n" avg_live_stack_error;
+    fprintf html "  </ul>\n";
+    fprintf html "</div>\n";
+  end;
+  
   fprintf html "</body>\n</html>\n";
   
   close_out html;
   log Info (sprintf "HTML report saved to %s" html_path);
   
   (* Return statistics *)
-  (plate_successes, star_successes, both_successes)
+  (plate_successes, star_successes, both_successes, live_stack_files)
 
 (* Main function *)
 let main () =
@@ -564,16 +818,25 @@ let main () =
   let reference_file_index = ref 0 in
   let image_dir = ref "" in
   let output_dir = ref "comparison_results" in
+  let verbose = ref false in
   
   let specs = [
     ("-ref", Arg.Set_int reference_file_index, "Reference image file index");
     ("-dir", Arg.Set_string image_dir, "Directory containing images to align");
     ("-out", Arg.Set_string output_dir, "Output directory for results");
+    ("-v", Arg.Set verbose, "Enable verbose output (debug information)");
+    ("-dump-headers", Arg.Unit (fun () -> 
+      log Info "Will dump all FITS headers for inspection"), 
+      "Dump all FITS headers for inspection");
   ] in
   
   let usage = "Usage: stack_comparison -ref reference_fits_index -dir image_directory [-out result_directory]" in
   
   Arg.parse specs (fun _ -> ()) usage;
+  
+  (* Enable debug mode if verbose flag is set *)
+  if !verbose then
+    debug_level := Debug;
   
   if !image_dir = "" then begin
     printf "Error: Image directory must be specified with -dir\n";
@@ -581,8 +844,88 @@ let main () =
     exit 1
   end;
   
+  (* Add a function to dump FITS headers to help diagnose missing live stack data *)
+  let dump_fits_headers () =
+    if not (Sys.file_exists !image_dir) then begin
+      log Error (sprintf "Directory '%s' not found" !image_dir);
+      exit 1
+    end;
+    
+    let files = 
+      try 
+        Sys.readdir !image_dir
+        |> Array.to_list
+        |> List.filter (fun f -> 
+            Filename.check_suffix f ".fits" || 
+            Filename.check_suffix f ".fit")
+        |> List.map (fun f -> Filename.concat !image_dir f)
+        |> List.sort compare
+      with _ -> 
+        log Error (sprintf "Error reading directory %s" !image_dir);
+        []
+    in
+    
+    if List.length files = 0 then begin
+      log Error "No FITS files found";
+      exit 1
+    end;
+    
+    (* Pick the first file to examine *)
+    let sample_file = List.hd files in
+    log Info (sprintf "Examining FITS header of %s" (Filename.basename sample_file));
+    
+    try
+      let hdrh = just_header sample_file in
+      log Info "FITS Header Contents:";
+      log Info "=====================";
+      
+      (* Print all keys and values in alphabetical order *)
+      let keys = Hashtbl.fold (fun k _ acc -> k :: acc) hdrh [] |> List.sort compare in
+      List.iter (fun key ->
+        try
+          let value = Hashtbl.find hdrh key in
+          log Info (sprintf "%s: %s" key value);
+          
+          (* Check if this might be one of our target keywords with a different case *)
+          if String.lowercase_ascii key = "coordrot" ||
+             String.lowercase_ascii key = "coordx" ||
+             String.lowercase_ascii key = "coordy" ||
+             String.lowercase_ascii key = "corrot" ||
+             String.lowercase_ascii key = "corx" ||
+             String.lowercase_ascii key = "cory" then
+            log Info (sprintf "Found potential match for live stacking data: %s" key)
+        with _ -> log Info (sprintf "%s: <error reading value>" key)
+      ) keys;
+      
+      (* Check specifically for our target keywords *)
+      let check_key key =
+        if Hashtbl.mem hdrh key then
+          log Info (sprintf "Found %s = %s" key (Hashtbl.find hdrh key))
+        else
+          log Info (sprintf "%s: NOT FOUND" key)
+      in
+      
+      log Info "\nChecking for live stacking keywords:";
+      check_key "COORDROT=";
+      check_key "COORDX";
+      check_key "COORDY";
+      check_key "CORROT";
+      check_key "CORX";
+      check_key "CORY";
+      
+    with e ->
+      log Error (sprintf "Error reading FITS header: %s" (Printexc.to_string e))
+  in
+  
+  (* Uncomment to enable header dumping by default *)
+  (* dump_fits_headers (); *)
+  
+  (* If verbose, dump headers first to help diagnose issues *)
+  if !verbose then
+    dump_fits_headers ();
+    
   (* Run the comparison *)
-  let (plate_successes, star_successes, both_successes) = 
+  let (plate_successes, star_successes, both_successes, live_stack_files) = 
     process_directory !reference_file_index !image_dir !output_dir in
   
   (* Print final summary *)
@@ -591,10 +934,10 @@ let main () =
   printf "Plate solve successes: %d\n" plate_successes;
   printf "Star alignment successes: %d\n" star_successes;
   printf "Both methods successful: %d\n" both_successes;
+  printf "Files with live stacking data: %d\n" live_stack_files;
   
   (* Exit with success status *)
   exit 0
 
 (* Run the main function *)
 let () = main ()
-  
