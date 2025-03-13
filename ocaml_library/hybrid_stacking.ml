@@ -370,9 +370,197 @@ let hybrid_stack files output_path ?(config=default_config) ?(reference_idx=0) (
       
       (* For RGB, we need to handle each channel separately *)
       if is_rgb then begin
-        (* RGB stacking to be implemented - similar to monochrome stacking but with 3 planes *)
-        log config "RGB stacking not yet implemented";
-        false
+        (* Process RGB images - handle each channel separately *)
+        log config "Processing RGB images";
+        
+        (* Find out how many planes and their size *)
+        let naxis3 = parse_int ref_hdr "NAXIS3" in
+        log config "RGB planes: %d" naxis3;
+        
+        if naxis3 != 3 then begin
+          log config "Error: Expected 3 planes for RGB image, found %d" naxis3;
+          false
+        end else begin
+          (* Create arrays for each color plane *)
+          let aligned_r = ref [||] in
+          let aligned_g = ref [||] in
+          let aligned_b = ref [||] in
+          
+          (* Process each file *)
+          let successful_count = ref 0 in
+          
+          List.iteri (fun i file ->
+            try
+              log config "Processing %s..." (Filename.basename file);
+              
+              (* Read target file header and extract info *)
+              let target_hdr = just_header file in
+              let target_width = parse_int target_hdr "NAXIS1" in
+              let target_height = parse_int target_hdr "NAXIS2" in
+              let target_naxis3 = parse_int target_hdr "NAXIS3" in
+              
+              if target_naxis3 != 3 then begin
+                log config "Error: File %s is not an RGB image (has %d planes)" 
+                  (Filename.basename file) target_naxis3;
+              end else begin
+                (* Extract target's WCS parameters and live stacking coordinates *)
+                let target_wcs = extract_wcs_params target_hdr in
+                let target_live_coords = extract_live_stacking_coords target_hdr in
+                
+                (* Determine the best transform method *)
+                let transform_opt = determine_best_transform target_wcs target_live_coords config in
+                
+                match transform_opt with
+                | Some transform ->
+                    (* Read the image data *)
+                    let _, contents = find_header_end file (read_image file) in
+                    
+                    (* Calculate plane size and offsets *)
+                    let plane_size = target_width * target_height * 2 in (* 16-bit = 2 bytes per pixel *)
+                    
+                    (* Initialize arrays for aligned color planes on first successful image *)
+                    if !successful_count = 0 then begin
+                      aligned_r := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+                      aligned_g := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+                      aligned_b := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+                    end;
+                    
+                    (* Extract and align each color plane *)
+                    for plane = 0 to 2 do
+                      let plane_offset = plane * plane_size in
+                      
+                      (* Extract the plane data *)
+                      let plane_data = Array.make_matrix target_height target_width 0 in
+                      for y = 0 to target_height - 1 do
+                        for x = 0 to target_width - 1 do
+                          let offset = plane_offset + (y * target_width + x) * 2 in
+                          if offset + 1 < String.length contents then
+                            plane_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
+                                                (int_of_char contents.[offset + 1])
+                        done
+                      done;
+                      
+                      (* Apply transform to align this plane *)
+                      let aligned_data = apply_transform plane_data target_width target_height 
+                                                       transform ref_width ref_height in
+                      
+                      (* Add to the appropriate color plane stack *)
+                      match plane with
+                        | 0 -> Array.set !aligned_r !successful_count aligned_data
+                        | 1 -> Array.set !aligned_g !successful_count aligned_data
+                        | 2 -> Array.set !aligned_b !successful_count aligned_data
+                        | _ -> failwith "Invalid color plane index"
+                    done;
+                    
+                    incr successful_count;
+                    log config "Successfully aligned RGB image and added to stack";
+                    
+                | None ->
+                    log config "Failed to determine alignment transform for %s" (Filename.basename file);
+              end
+            with e ->
+              log config "Error processing file %s: %s" 
+                (Filename.basename file) (Printexc.to_string e);
+          ) files;
+          
+          (* Resize the aligned image arrays to the actual number of successfully aligned images *)
+          if !successful_count > 0 then begin
+            aligned_r := Array.sub !aligned_r 0 !successful_count;
+            aligned_g := Array.sub !aligned_g 0 !successful_count;
+            aligned_b := Array.sub !aligned_b 0 !successful_count;
+            
+            log config "Stacking %d successfully aligned RGB images" !successful_count;
+            
+            (* Stack each color plane separately *)
+            let stacked_r = stack_aligned_images !aligned_r config ref_width ref_height in
+            let stacked_g = stack_aligned_images !aligned_g config ref_width ref_height in
+            let stacked_b = stack_aligned_images !aligned_b config ref_width ref_height in
+            
+            (* Create FITS header for output file *)
+            let header = Hashtbl.create 50 in
+            
+            (* Set RGB dimensions *)
+            Hashtbl.add header "SIMPLE" " = T / FITS standard";
+            Hashtbl.add header "BITPIX" " = 16 / 16-bit signed integers";
+            Hashtbl.add header "NAXIS" " = 3 / Number of data axes";
+            Hashtbl.add header "NAXIS1" (Printf.sprintf " = %d / Width in pixels" ref_width);
+            Hashtbl.add header "NAXIS2" (Printf.sprintf " = %d / Height in pixels" ref_height);
+            Hashtbl.add header "NAXIS3" " = 3 / Number of color planes (RGB)";
+            Hashtbl.add header "EXTEND" " = T / Extensions may be present";
+            Hashtbl.add header "BZERO" " = 32768 / Offset to unsigned short range";
+            Hashtbl.add header "BSCALE" " = 1 / Default scaling factor";
+            
+            (* Copy WCS keywords from reference if available *)
+            if ref_wcs <> None then begin
+              let wcs = Option.get ref_wcs in
+              Hashtbl.add header "CTYPE1" " = 'RA---TAN' / Right ascension, tangent projection";
+              Hashtbl.add header "CTYPE2" " = 'DEC--TAN' / Declination, tangent projection";
+              Hashtbl.add header "CRPIX1" (sprintf " = %.6f / X reference pixel" wcs.crpix1);
+              Hashtbl.add header "CRPIX2" (sprintf " = %.6f / Y reference pixel" wcs.crpix2);
+              Hashtbl.add header "CRVAL1" (sprintf " = %.10f / RA at reference pixel (deg)" wcs.crval1);
+              Hashtbl.add header "CRVAL2" (sprintf " = %.10f / Dec at reference pixel (deg)" wcs.crval2);
+              Hashtbl.add header "CD1_1" (sprintf " = %.10e / Transformation matrix element" wcs.cd1_1);
+              Hashtbl.add header "CD1_2" (sprintf " = %.10e / Transformation matrix element" wcs.cd1_2);
+              Hashtbl.add header "CD2_1" (sprintf " = %.10e / Transformation matrix element" wcs.cd2_1);
+              Hashtbl.add header "CD2_2" (sprintf " = %.10e / Transformation matrix element" wcs.cd2_2);
+              Hashtbl.add header "EQUINOX" (sprintf " = %.1f / Equinox of coordinates" wcs.equinox);
+            end;
+            
+            (* Add metadata about stacking *)
+            Hashtbl.add header "HISTORY" " Stacked with OCaml Hybrid Stacking";
+            Hashtbl.add header "HISTORY" (sprintf " Stacking method: %s" 
+              (match config.stacking_method with
+               | Average -> "Average"
+               | Median -> "Median"
+               | SigmaClip sigma -> sprintf "SigmaClip (%.1f)" sigma
+               | Kappa k -> sprintf "Kappa (%.1f)" k
+               | WeightedAverage -> "WeightedAverage"));
+            Hashtbl.add header "HISTORY" (sprintf " Number of frames: %d" !successful_count);
+            
+            (* Write the stacked RGB image *)
+            let oc = open_out_bin output_path in
+            
+            (* Write header *)
+            ignore (write_fits_header oc header);
+            
+            (* Write red plane *)
+            for y = 0 to ref_height - 1 do
+              for x = 0 to ref_width - 1 do
+                output_byte oc (stacked_r.(y).(x) lsr 8);
+                output_byte oc (stacked_r.(y).(x) land 0xFF);
+              done
+            done;
+            
+            (* Write green plane *)
+            for y = 0 to ref_height - 1 do
+              for x = 0 to ref_width - 1 do
+                output_byte oc (stacked_g.(y).(x) lsr 8);
+                output_byte oc (stacked_g.(y).(x) land 0xFF);
+              done
+            done;
+            
+            (* Write blue plane *)
+            for y = 0 to ref_height - 1 do
+              for x = 0 to ref_width - 1 do
+                output_byte oc (stacked_b.(y).(x) lsr 8);
+                output_byte oc (stacked_b.(y).(x) land 0xFF);
+              done
+            done;
+            
+            (* Pad data to multiple of 2880 bytes *)
+            let data_size = ref_width * ref_height * 2 * 3 in
+            let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
+            output_string oc (String.make padding_size '\000');
+            
+            close_out oc;
+            
+            log config "Stacked RGB image saved to %s" output_path;
+            true
+          end else begin
+            log config "No RGB images were successfully aligned";
+            false
+          end
+        end
       end else begin
         (* Process each target file *)
         let successful_count = ref 0 in
