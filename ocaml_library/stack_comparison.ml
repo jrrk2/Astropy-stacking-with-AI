@@ -990,6 +990,3 @@ let main () =
   
   (* Exit with success status *)
   exit 0
-
-(* Run the main function *)
-let () = main ()

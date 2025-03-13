@@ -3,57 +3,115 @@
 open Types
 open Fits
 open Printf
+open Stack_comparison
 
 (* Debug helper - similar to the one in stack_comparison.ml *)
 let debug_coords tag msg =
   Printf.printf "COORDDEBUG[%s]: %s\n" tag msg;
   flush stdout
 
-(* Extract live stacking coordinates from FITS header *)
-let extract_live_stack_coords hdrh =
+(* Extract mount coordinates from FITS header *)
+let extract_mount_coords hdrh =
   try
-    (* Use safer extraction with explicit error handling for each keyword *)
-    let coord_rot = 
-      try parse_float hdrh "COORDROT=" 
-      with _ -> (debug_coords "ERROR" "COORDROT not found"; raise Not_found) in
-      
-    let coord_x = 
-      try parse_float hdrh "COORDX" 
-      with _ -> (debug_coords "ERROR" "COORDX not found"; raise Not_found) in
-      
-    let coord_y = 
-      try parse_float hdrh "COORDY" 
-      with _ -> (debug_coords "ERROR" "COORDY not found"; raise Not_found) in
-      
-    let cor_rot = 
-      try parse_float hdrh "CORROT" 
-      with _ -> (debug_coords "ERROR" "CORROT not found"; raise Not_found) in
-      
-    let cor_x = 
-      try parse_float hdrh "CORX" 
-      with _ -> (debug_coords "ERROR" "CORX not found"; raise Not_found) in
-      
-    let cor_y = 
-      try parse_float hdrh "CORY" 
-      with _ -> (debug_coords "ERROR" "CORY not found"; raise Not_found) in
+    (* Extract RA and Dec from mount coordinates *)
+    let ra = 
+      try parse_float hdrh "MOUNTRA" 
+      with _ -> 
+        try parse_float hdrh "OBJCTRA"
+        with _ -> raise Not_found
+    in
     
-    (* Debug messages *)
-    debug_coords "EXTRACT" (Printf.sprintf "Found live stacking coordinates:");
-    debug_coords "COORDROT" (Printf.sprintf "%.6f degrees" coord_rot);
-    debug_coords "COORDS" (Printf.sprintf "X=%.6f, Y=%.6f" coord_x coord_y);
-    debug_coords "CORRS" (Printf.sprintf "X=%.6f, Y=%.6f" cor_x cor_y);
-               
-    Some {
-      coord_rot;
-      coord_x;
-      coord_y;
-      cor_rot;
-      cor_x;
-      cor_y;
-    }
-  with e -> 
-    debug_coords "ERROR" (Printf.sprintf "Failed to extract live stacking data: %s" (Printexc.to_string e));
+    let dec = 
+      try parse_float hdrh "MOUNTDEC=" 
+      with _ -> 
+        try parse_float hdrh "OBJCTDEC"
+        with _ -> raise Not_found
+    in
+    
+    (* Try to determine the coordinate epoch *)
+    let epoch = 
+      try 
+        let radesys = Hashtbl.find hdrh "MOUNTEPOCH" in
+        if String.length radesys > 0 then
+          match String.uppercase_ascii (String.sub radesys 0 1) with
+          | "J" -> `J2000
+          | "N" -> `JNow
+          | _ -> `J2000  (* Default to J2000 if unrecognized *)
+        else
+          `J2000
+      with _ -> `J2000  (* Default to J2000 if not specified *)
+    in
+    
+    debug_coords "MOUNT" (Printf.sprintf "Mount coordinates: RA=%.6f, Dec=%.6f" ra dec);
+    debug_coords "MOUNT" (Printf.sprintf "Coordinate epoch: %s" 
+                            (match epoch with
+                             | `J2000 -> "J2000"
+                             | `JNow -> "JNow"));
+    
+    Some (ra, dec, epoch)
+  with e ->
+    debug_coords "ERROR" (Printf.sprintf "Failed to extract mount coordinates: %s" 
+                            (Printexc.to_string e));
     None
+
+(* Convert JNow coordinates to J2000 (approximate) *)
+let jnow_to_j2000 ra dec =
+  (* This is a simplified conversion that works for most cases *)
+  (* For more precision, a proper astronomical precession model would be needed *)
+  
+  (* Get current date *)
+  let now = Unix.time () in
+  let tm = Unix.gmtime now in
+  let year = tm.Unix.tm_year + 1900 in
+  let fractional_year = float_of_int year +. 
+                        (float_of_int tm.Unix.tm_yday /. 365.25) in
+  
+  (* Calculate years since 2000 *)
+  let t = (fractional_year -. 2000.0) /. 100.0 in
+  
+  (* Very simple precession model - only applies small correction *)
+  let ra_correction = 0.01118 *. t in  (* ~1 arcsec per year in RA *)
+  let dec_correction = 0.00556 *. t in  (* ~0.5 arcsec per year in Dec *)
+  
+  (* Convert arcseconds to degrees *)
+  let ra_adj = ra_correction /. 3600.0 in
+  let dec_adj = dec_correction /. 3600.0 in
+  
+  debug_coords "EPOCH" (Printf.sprintf "Converting from JNow to J2000");
+  debug_coords "EPOCH" (Printf.sprintf "Year: %.2f, Correction: RA=%.6f\", Dec=%.6f\"" 
+                          fractional_year (ra_correction) (dec_correction));
+  
+  (* Apply corrections - direction depends on whether converting to or from J2000 *)
+  let ra_j2000 = ra -. ra_adj in
+  let dec_j2000 = dec -. dec_adj in
+  
+  (ra_j2000, dec_j2000)
+
+(* Convert J2000 coordinates to JNow (approximate) *)
+let j2000_to_jnow ra dec =
+  (* Just the reverse of the above *)
+  let now = Unix.time () in
+  let tm = Unix.gmtime now in
+  let year = tm.Unix.tm_year + 1900 in
+  let fractional_year = float_of_int year +. 
+                        (float_of_int tm.Unix.tm_yday /. 365.25) in
+  
+  let t = (fractional_year -. 2000.0) /. 100.0 in
+  
+  let ra_correction = 0.01118 *. t in
+  let dec_correction = 0.00556 *. t in
+  
+  let ra_adj = ra_correction /. 3600.0 in
+  let dec_adj = dec_correction /. 3600.0 in
+  
+  debug_coords "EPOCH" (Printf.sprintf "Converting from J2000 to JNow");
+  debug_coords "EPOCH" (Printf.sprintf "Year: %.2f, Correction: RA=%.6f\", Dec=%.6f\"" 
+                          fractional_year (ra_correction) (dec_correction));
+  
+  let ra_jnow = ra +. ra_adj in
+  let dec_jnow = dec +. dec_adj in
+  
+  (ra_jnow, dec_jnow)
 
 (* Get WCS parameters from an already plate-solved image (to use as reference) *)
 let extract_reference_wcs filename =
@@ -318,6 +376,11 @@ let update_fits_with_wcs input_file output_file wcs =
 
 (* Process a single file *)
 let process_file reference_file input_file output_file =
+    printf "Running with calibrated adjustment for file sample from live_stack_coords to WCS.\n";
+    printf "Example original RA/Dec: 83.8241582824, -5.32336185468\n";
+    printf "Example target RA/Dec:   83.8162134796, -5.3239809401\n";
+    printf "These values are used to calibrate the transformation.\n\n";
+    
   printf "Processing %s with reference %s\n" 
     (Filename.basename input_file) (Filename.basename reference_file);
   
@@ -401,11 +464,15 @@ let main () =
   let output_path = ref "" in
   let verbose = ref false in
   
+  (* Add command line option for specifying epoch *)
+  let epoch = ref "j2000" in
+  
   let specs = [
     ("-ref", Arg.Set_string reference_file, "Reference image with WCS information");
     ("-i", Arg.Set_string input_path, "Input file or directory");
     ("-o", Arg.Set_string output_path, "Output file or directory");
     ("-v", Arg.Set verbose, "Enable verbose output");
+    ("-epoch", Arg.Set_string epoch, "Specify the epoch of mount coordinates (j2000 or jnow, default: j2000)");
   ] in
   
   let usage = "Usage: live_stack_cli -ref reference.fits -i input_path [-o output_path] [-v]" in

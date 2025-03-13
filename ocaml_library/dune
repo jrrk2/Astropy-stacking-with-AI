@@ -44,9 +44,9 @@
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface debayer_integration dark_temp_analysis dark_calibration debayer_integration astro_noise_analysis simbad query_simbad stellina_integration))
 
 (executable
- (name stack_comparison)
+ (name stack_comparison_cli)
  (libraries str unix bigarray plplot cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
- (modules fits fits_utils parallel_plate_solve plate_solve_verification astrometric_alignment triangle_alignment rgb_star_alignment stack_comparison))
+ (modules fits fits_utils parallel_plate_solve plate_solve_verification astrometric_alignment triangle_alignment rgb_star_alignment stack_comparison stack_comparison_cli))
 
 (executable
   (name simbad_main)
@@ -66,7 +66,12 @@
 (executable
   (name live_stack_cli)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
-  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis astrometric_alignment hybrid_stacking plate_solve_verification parallel_plate_solve live_stack_cli))
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis plate_solve_verification parallel_plate_solve rgb_star_alignment astrometric_alignment stack_comparison live_stack_cli))
+
+(executable
+  (name fits_compare)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
+  (modules fits util fits_compare))
 
 (library
   (name types)

@@ -18,7 +18,7 @@ verify: _build/default/plate_solve_cli.exe
 	env OCAMLRUNPARAM=b _build/default/plate_solve_cli.exe -workers $(WORKERS) -i rgb
 
 stack: _build/default/astrometric_stack_cli.exe
-	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -o stacked_solved.fits solved_verification/cal_*_rgb.fits
+	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -o stacked_live.fits wcs_output/cal_*_rgb_wcs.fits
 
 test: _build/default/fits_reader_test.exe
 	env OCAMLRUNPARAM=b _build/default/fits_reader_test.exe -f solved_verification/cal_20250217_204959_BGGR_rgb.fits
@@ -27,8 +27,11 @@ detect: _build/default/star_detection_cli.exe
 	-@rm -rf star_detection_results
 	_build/default/star_detection_cli.exe -workers $(WORKERS) -visualize -i solved_verification
 
-compare: _build/default/stack_comparison.exe
-	_build/default/stack_comparison.exe -ref 0 -dir rgb
+compare: _build/default/stack_comparison_cli.exe
+	_build/default/stack_comparison_cli.exe -ref 0 -dir rgb
+
+cmpfits: _build/default/fits_compare.exe
+	_build/default/fits_compare.exe -ref solved_verification -cmp wcs_output
 
 live: _build/default/live_stack_cli.exe
 	env OCAMLRUNPARAM=b _build/default/live_stack_cli.exe -ref solved_verification/cal_20250217_204343_BGGR_rgb.fits -i rgb
@@ -57,8 +60,11 @@ _build/default/star_detection_cli.exe:
 _build/default/fits_reader_test.exe:
 	dune build $@
 
-_build/default/stack_comparison.exe:
+_build/default/stack_comparison_cli.exe:
 	dune build $@
 
-_build/default/hybrid_stacking_cli.exe:
+_build/default/live_stack_cli.exe:
+	dune build $@
+
+_build/default/fits_compare.exe:
 	dune build $@
