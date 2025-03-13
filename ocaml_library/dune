@@ -64,9 +64,9 @@
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis astrometric_alignment astrometric_stack_cli))
 
 (executable
-  (name hybrid_stacking_cli)
+  (name live_stack_cli)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
-  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis astrometric_alignment hybrid_stacking plate_solve_verification parallel_plate_solve hybrid_stacking_cli))
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis astrometric_alignment hybrid_stacking plate_solve_verification parallel_plate_solve live_stack_cli))
 
 (library
   (name types)

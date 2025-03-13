@@ -31,6 +31,149 @@ let log config fmt =
   else
     Printf.ikfprintf (fun _ -> ()) stdout fmt
 
+(* Add this function to hybrid_stacking.ml *)
+let dump_transformation_info file_ref target_file transform =
+  let out_file = Filename.concat (Filename.get_temp_dir_name ()) 
+    (Printf.sprintf "transform_%s_to_%s.txt" 
+      (Filename.basename target_file) 
+      (Filename.basename file_ref)) in
+
+  print_endline out_file;
+
+  let oc = open_out_gen [Open_creat; Open_wronly; Open_append] 0o644 out_file in
+  
+  (* Get header and WCS info *)
+  let ref_hdr = just_header file_ref in
+  let ref_wcs = extract_wcs_params ref_hdr in
+  
+  let target_hdr = just_header target_file in
+  let target_wcs = extract_wcs_params target_hdr in
+  
+  (* Write basic info *)
+  fprintf oc "=== Transformation Details ===\n";
+  fprintf oc "Reference: %s\n" (Filename.basename file_ref);
+  fprintf oc "Target: %s\n" (Filename.basename target_file);
+  fprintf oc "Method: Hybrid stacking\n\n";
+  
+  (* Write transformation parameters *)
+  fprintf oc "Transform parameters:\n";
+  fprintf oc "  dx: %.6f\n" transform.dx;
+  fprintf oc "  dy: %.6f\n" transform.dy;
+  fprintf oc "  rotation: %.6f rad (%.2f deg)\n" 
+    transform.rotation (transform.rotation *. 180.0 /. Float.pi);
+  fprintf oc "  scale: %.6f\n\n" transform.scale;
+  
+  (* Write WCS parameters for reference *)
+  (match ref_wcs with
+  | Some wcs ->
+      fprintf oc "Reference WCS parameters:\n";
+      fprintf oc "  CRPIX1: %.6f\n" wcs.crpix1;
+      fprintf oc "  CRPIX2: %.6f\n" wcs.crpix2;
+      fprintf oc "  CRVAL1: %.6f\n" wcs.crval1;
+      fprintf oc "  CRVAL2: %.6f\n" wcs.crval2;
+      fprintf oc "  CD1_1: %.6e\n" wcs.cd1_1;
+      fprintf oc "  CD1_2: %.6e\n" wcs.cd1_2;
+      fprintf oc "  CD2_1: %.6e\n" wcs.cd2_1;
+      fprintf oc "  CD2_2: %.6e\n" wcs.cd2_2;
+      fprintf oc "  Equinox: %.1f\n\n" wcs.equinox;
+  | None ->
+      fprintf oc "Reference WCS parameters: None\n\n");
+  
+  (* Write WCS parameters for target *)
+  (match target_wcs with
+  | Some wcs ->
+      fprintf oc "Target WCS parameters:\n";
+      fprintf oc "  CRPIX1: %.6f\n" wcs.crpix1;
+      fprintf oc "  CRPIX2: %.6f\n" wcs.crpix2;
+      fprintf oc "  CRVAL1: %.6f\n" wcs.crval1;
+      fprintf oc "  CRVAL2: %.6f\n" wcs.crval2;
+      fprintf oc "  CD1_1: %.6e\n" wcs.cd1_1;
+      fprintf oc "  CD1_2: %.6e\n" wcs.cd1_2;
+      fprintf oc "  CD2_1: %.6e\n" wcs.cd2_1;
+      fprintf oc "  CD2_2: %.6e\n" wcs.cd2_2;
+      fprintf oc "  Equinox: %.1f\n\n" wcs.equinox;
+  | None ->
+      fprintf oc "Target WCS parameters: None\n\n");
+      
+  (* Test some reference points *)
+  let ref_width = parse_int ref_hdr "NAXIS1" in
+  let ref_height = parse_int ref_hdr "NAXIS2" in
+  let target_width = parse_int target_hdr "NAXIS1" in
+  let target_height = parse_int target_hdr "NAXIS2" in
+  
+  fprintf oc "Dimensions: Reference %dx%d, Target %dx%d\n\n" 
+    ref_width ref_height target_width target_height;
+  
+  (* Test some key points to see how they transform *)
+  fprintf oc "Test points transformation (target -> reference):\n";
+  
+  let test_points = [
+    (0, 0, "Top-left corner");
+    (target_width/2, target_height/2, "Center");
+    (target_width-1, target_height-1, "Bottom-right corner");
+    (target_width/4, target_height/4, "1/4 point");
+    (3*target_width/4, 3*target_height/4, "3/4 point");
+  ] in
+  
+  List.iter (fun (x, y, label) ->
+    let src_x = float_of_int x in
+    let src_y = float_of_int y in
+    
+    (* Apply center-relative transform *)
+    let src_x_centered = src_x -. float_of_int target_width /. 2.0 in
+    let src_y_centered = src_y -. float_of_int target_height /. 2.0 in
+    
+    (* Apply rotation and scaling *)
+    let cos_rot = cos transform.rotation in
+    let sin_rot = sin transform.rotation in
+    
+    let x_rot = src_x_centered *. cos_rot -. src_y_centered *. sin_rot in
+    let y_rot = src_x_centered *. sin_rot +. src_y_centered *. cos_rot in
+    
+    (* Apply scaling *)
+    let x_scaled = x_rot *. transform.scale in
+    let y_scaled = y_rot *. transform.scale in
+    
+    (* Center in reference image and apply offset *)
+    let dst_x = x_scaled +. float_of_int ref_width /. 2.0 +. transform.dx in
+    let dst_y = y_scaled +. float_of_int ref_height /. 2.0 +. transform.dy in
+    
+    fprintf oc "  %s (%d,%d) -> (%.2f,%.2f)\n" label x y dst_x dst_y;
+    
+    (* Now try with WCS if available *)
+    match ref_wcs, target_wcs with
+    | Some r_wcs, Some t_wcs ->
+        (* Convert target pixel to sky coords *)
+        let sky_ra, sky_dec = Astrometric_alignment.pixel_to_sky t_wcs src_x src_y in
+        
+        (* Convert sky coords to reference pixels *)
+        let ref_x, ref_y = Astrometric_alignment.sky_to_pixel r_wcs sky_ra sky_dec in
+        
+        fprintf oc "    WCS: (%d,%d) -> (%.6f,%.6f) -> (%.2f,%.2f)\n" 
+          x y sky_ra sky_dec ref_x ref_y;
+        
+        (* Calculate difference between transform methods *)
+        fprintf oc "    Difference: (%.2f,%.2f)\n" 
+          (dst_x -. ref_x) (dst_y -. ref_y);
+    | _ -> fprintf oc "    WCS conversion not available\n";
+  ) test_points;
+  
+  (* Write CD matrix determinants *)
+  (match ref_wcs, target_wcs with
+  | Some r_wcs, Some t_wcs ->
+      let ref_det = r_wcs.cd1_1 *. r_wcs.cd2_2 -. r_wcs.cd1_2 *. r_wcs.cd2_1 in
+      let target_det = t_wcs.cd1_1 *. t_wcs.cd2_2 -. t_wcs.cd1_2 *. t_wcs.cd2_1 in
+      
+      fprintf oc "\nCD Matrix determinants:\n";
+      fprintf oc "  Reference: %.6e\n" ref_det;
+      fprintf oc "  Target: %.6e\n" target_det;
+      fprintf oc "  Ratio: %.6f\n" (ref_det /. target_det);
+  | _ -> ());
+  
+  close_out oc;
+  
+  printf "Dumped transformation info to %s\n" out_file
+
 (* Extract live stacking coordinates from FITS header *)
 let extract_live_stacking_coords hdrh =
   try
@@ -229,6 +372,76 @@ let apply_transform src_data src_width src_height transform dst_width dst_height
   
   dst_data
 
+(* hybrid_stacking.ml - WCS Alignment Function *)
+
+(* Add this function after the apply_transform function *)
+let apply_wcs_transform src_data src_width src_height src_wcs dst_wcs dst_width dst_height =
+  (* Create output image buffer *)
+  let dst_data = Array.make_matrix dst_height dst_width 0 in
+  
+  (* Create transformation function directly from WCS parameters *)
+  let transform = Astrometric_alignment.create_wcs_transform src_wcs dst_wcs in
+  
+  (* Iterate through each pixel in destination image *)
+  for y = 0 to dst_height - 1 do
+    for x = 0 to dst_width - 1 do
+      (* Calculate source coordinates using WCS transform *)
+      let src_x, src_y = transform (float_of_int x) (float_of_int y) in
+      
+      (* Check if source coordinates are within bounds *)
+      if src_x >= 0.0 && src_x < float_of_int src_width -. 1.0 &&
+         src_y >= 0.0 && src_y < float_of_int src_height -. 1.0 then begin
+        
+        (* Bilinear interpolation *)
+        let src_x_floor = floor src_x in
+        let src_y_floor = floor src_y in
+        let src_x_int = int_of_float src_x_floor in
+        let src_y_int = int_of_float src_y_floor in
+        
+        let x_frac = src_x -. src_x_floor in
+        let y_frac = src_y -. src_y_floor in
+        
+        (* Get the four surrounding pixels *)
+        let p00 = float_of_int src_data.(src_y_int).(src_x_int) in
+        let p10 = float_of_int src_data.(src_y_int).(src_x_int + 1) in
+        let p01 = float_of_int src_data.(src_y_int + 1).(src_x_int) in
+        let p11 = float_of_int src_data.(src_y_int + 1).(src_x_int + 1) in
+        
+        (* Interpolate *)
+        let value = 
+          p00 *. (1.0 -. x_frac) *. (1.0 -. y_frac) +.
+          p10 *. x_frac *. (1.0 -. y_frac) +.
+          p01 *. (1.0 -. x_frac) *. y_frac +.
+          p11 *. x_frac *. y_frac
+        in
+        
+        dst_data.(y).(x) <- int_of_float (Float.round value)
+      end
+    done;
+  done;
+  
+  dst_data
+
+(* Add this function for RGB plane extraction and alignment *)
+let extract_and_align_rgb_plane contents plane_index target_width target_height src_wcs dst_wcs dst_width dst_height =
+  let plane_size = target_width * target_height * 2 in (* 16-bit = 2 bytes per pixel *)
+  let plane_offset = plane_index * plane_size in
+  
+  (* Extract the plane data *)
+  let plane_data = Array.make_matrix target_height target_width 0 in
+  for y = 0 to target_height - 1 do
+    for x = 0 to target_width - 1 do
+      let offset = plane_offset + (y * target_width + x) * 2 in
+      if offset + 1 < String.length contents then
+        plane_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
+                             (int_of_char contents.[offset + 1])
+    done
+  done;
+  
+  (* Apply WCS transform to align this plane *)
+  apply_wcs_transform plane_data target_width target_height 
+                     src_wcs dst_wcs dst_width dst_height
+
 (* Stack all aligned images using the specified method *)
 let stack_aligned_images aligned_images config dst_width dst_height =
   log config "Stacking %d aligned images using %s method" 
@@ -409,54 +622,93 @@ let hybrid_stack files output_path ?(config=default_config) ?(reference_idx=0) (
                 
                 (* Determine the best transform method *)
                 let transform_opt = determine_best_transform target_wcs target_live_coords config in
+		match ref_wcs, target_wcs with
+		| Some r_wcs, Some t_wcs when config.use_plate_solving ->
+		    (* Use WCS-based transformation directly for all planes *)
+		    log config "Using WCS-based transformation from plate solving";
+
+		    (* Read the image data *)
+		    let _, contents = find_header_end file (read_image file) in
+
+		    (* Initialize arrays for aligned color planes on first successful image *)
+		    if !successful_count = 0 then begin
+		      aligned_r := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+		      aligned_g := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+		      aligned_b := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+		    end;
+
+		    (* Extract and align each color plane using WCS transformation *)
+		    let r_aligned = extract_and_align_rgb_plane contents 0 target_width target_height t_wcs r_wcs ref_width ref_height in
+		    let g_aligned = extract_and_align_rgb_plane contents 1 target_width target_height t_wcs r_wcs ref_width ref_height in
+		    let b_aligned = extract_and_align_rgb_plane contents 2 target_width target_height t_wcs r_wcs ref_width ref_height in
+
+		    if config.verbose then
+		      dump_transformation_info reference_file file {dx=0.0; dy=0.0; rotation=0.0; scale=1.0};
+
+		    (* Add to the appropriate color plane stacks *)
+		    Array.set !aligned_r !successful_count r_aligned;
+		    Array.set !aligned_g !successful_count g_aligned;
+		    Array.set !aligned_b !successful_count b_aligned;
+
+		    incr successful_count;
+		    log config "Successfully aligned RGB image and added to stack";
+
+		| _ ->
+		    match target_live_coords with 
+		    | Some live_coords when config.use_live_stacking ->
+			(* Use live stacking coordinates - keep existing implementation *)
+			log config "Using live stacking coordinates for RGB alignment";
+			let transform = convert_live_stacking_to_transform live_coords in
+
+			(* Read the image data *)
+			let _, contents = find_header_end file (read_image file) in
+
+			(* Calculate plane size and offsets *)
+			let plane_size = target_width * target_height * 2 in (* 16-bit = 2 bytes per pixel *)
+
+			(* Initialize arrays for aligned color planes on first successful image *)
+			if !successful_count = 0 then begin
+			  aligned_r := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+			  aligned_g := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+			  aligned_b := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
+			end;
+
+			(* Extract and align each color plane *)
+			for plane = 0 to 2 do
+			  let plane_offset = plane * plane_size in
+
+			  (* Extract the plane data *)
+			  let plane_data = Array.make_matrix target_height target_width 0 in
+			  for y = 0 to target_height - 1 do
+			    for x = 0 to target_width - 1 do
+			      let offset = plane_offset + (y * target_width + x) * 2 in
+			      if offset + 1 < String.length contents then
+				plane_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
+						    (int_of_char contents.[offset + 1])
+			    done
+			  done;
+
+			  (* Apply transform to align this plane *)
+			  let aligned_data = apply_transform plane_data target_width target_height 
+							   transform ref_width ref_height in
+
+			  (* Add to the appropriate color plane stack *)
+			  match plane with
+			    | 0 -> Array.set !aligned_r !successful_count aligned_data
+			    | 1 -> Array.set !aligned_g !successful_count aligned_data
+			    | 2 -> Array.set !aligned_b !successful_count aligned_data
+			    | _ -> failwith "Invalid color plane index"
+			done;
+
+			if config.verbose then
+			  dump_transformation_info reference_file file transform;
+
+			incr successful_count;
+			log config "Successfully aligned RGB image and added to stack";
+
+		    | _ ->
+			log config "No valid transform method available for RGB alignment of %s" (Filename.basename file);
                 
-                match transform_opt with
-                | Some transform ->
-                    (* Read the image data *)
-                    let _, contents = find_header_end file (read_image file) in
-                    
-                    (* Calculate plane size and offsets *)
-                    let plane_size = target_width * target_height * 2 in (* 16-bit = 2 bytes per pixel *)
-                    
-                    (* Initialize arrays for aligned color planes on first successful image *)
-                    if !successful_count = 0 then begin
-                      aligned_r := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
-                      aligned_g := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
-                      aligned_b := Array.make (List.length files) (Array.make_matrix ref_height ref_width 0);
-                    end;
-                    
-                    (* Extract and align each color plane *)
-                    for plane = 0 to 2 do
-                      let plane_offset = plane * plane_size in
-                      
-                      (* Extract the plane data *)
-                      let plane_data = Array.make_matrix target_height target_width 0 in
-                      for y = 0 to target_height - 1 do
-                        for x = 0 to target_width - 1 do
-                          let offset = plane_offset + (y * target_width + x) * 2 in
-                          if offset + 1 < String.length contents then
-                            plane_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
-                                                (int_of_char contents.[offset + 1])
-                        done
-                      done;
-                      
-                      (* Apply transform to align this plane *)
-                      let aligned_data = apply_transform plane_data target_width target_height 
-                                                       transform ref_width ref_height in
-                      
-                      (* Add to the appropriate color plane stack *)
-                      match plane with
-                        | 0 -> Array.set !aligned_r !successful_count aligned_data
-                        | 1 -> Array.set !aligned_g !successful_count aligned_data
-                        | 2 -> Array.set !aligned_b !successful_count aligned_data
-                        | _ -> failwith "Invalid color plane index"
-                    done;
-                    
-                    incr successful_count;
-                    log config "Successfully aligned RGB image and added to stack";
-                    
-                | None ->
-                    log config "Failed to determine alignment transform for %s" (Filename.basename file);
               end
             with e ->
               log config "Error processing file %s: %s" 

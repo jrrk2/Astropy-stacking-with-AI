@@ -1,6 +1,7 @@
 (* astrometric_alignment.ml - Functions for alignment based on plate solving data *)
 open Types
 open Fits
+open Printf
 
 (* WCS parameters from plate solved FITS headers *)
 type wcs_params = {
@@ -366,7 +367,162 @@ let apply_stacking_method values stacking_method =
     else
         0
 
+
+(* Add this function to astrometric_alignment.ml *)
+let dump_astrometric_transformation_info reference_file target_file =
+  let out_file = Filename.concat (Filename.get_temp_dir_name ()) 
+    (Printf.sprintf "astrometric_transform_%s_to_%s.txt" 
+      (Filename.basename target_file) 
+      (Filename.basename reference_file)) in
+
+  print_endline out_file;
+
+  let oc = open_out_gen [Open_creat; Open_wronly; Open_append] 0o644 out_file in
+  
+  (* Get header and WCS info *)
+  let ref_hdr = Fits.just_header reference_file in
+  let ref_wcs_opt = extract_wcs_params ref_hdr in
+  
+  let target_hdr = Fits.just_header target_file in
+  let target_wcs_opt = extract_wcs_params target_hdr in
+  
+  (* Write basic info *)
+  fprintf oc "=== Astrometric Transformation Details ===\n";
+  fprintf oc "Reference: %s\n" (Filename.basename reference_file);
+  fprintf oc "Target: %s\n" (Filename.basename target_file);
+  fprintf oc "Method: Astrometric alignment\n\n";
+  
+  match ref_wcs_opt, target_wcs_opt with
+  | Some ref_wcs, Some target_wcs ->
+      (* Write WCS parameters *)
+      fprintf oc "Reference WCS parameters:\n";
+      fprintf oc "  CRPIX1: %.6f\n" ref_wcs.crpix1;
+      fprintf oc "  CRPIX2: %.6f\n" ref_wcs.crpix2;
+      fprintf oc "  CRVAL1: %.6f\n" ref_wcs.crval1;
+      fprintf oc "  CRVAL2: %.6f\n" ref_wcs.crval2;
+      fprintf oc "  CD1_1: %.6e\n" ref_wcs.cd1_1;
+      fprintf oc "  CD1_2: %.6e\n" ref_wcs.cd1_2;
+      fprintf oc "  CD2_1: %.6e\n" ref_wcs.cd2_1;
+      fprintf oc "  CD2_2: %.6e\n" ref_wcs.cd2_2;
+      fprintf oc "  Equinox: %.1f\n\n" ref_wcs.equinox;
+      
+      fprintf oc "Target WCS parameters:\n";
+      fprintf oc "  CRPIX1: %.6f\n" target_wcs.crpix1;
+      fprintf oc "  CRPIX2: %.6f\n" target_wcs.crpix2;
+      fprintf oc "  CRVAL1: %.6f\n" target_wcs.crval1;
+      fprintf oc "  CRVAL2: %.6f\n" target_wcs.crval2;
+      fprintf oc "  CD1_1: %.6e\n" target_wcs.cd1_1;
+      fprintf oc "  CD1_2: %.6e\n" target_wcs.cd1_2;
+      fprintf oc "  CD2_1: %.6e\n" target_wcs.cd2_1;
+      fprintf oc "  CD2_2: %.6e\n" target_wcs.cd2_2;
+      fprintf oc "  Equinox: %.1f\n\n" target_wcs.equinox;
+      
+      (* Create transform function *)
+      let transform = create_wcs_transform target_wcs ref_wcs in
+      
+      (* Get dimensions *)
+      let ref_width = parse_int ref_hdr "NAXIS1" in
+      let ref_height = parse_int ref_hdr "NAXIS2" in
+      let target_width = parse_int target_hdr "NAXIS1" in
+      let target_height = parse_int target_hdr "NAXIS2" in
+      
+      fprintf oc "Dimensions: Reference %dx%d, Target %dx%d\n\n" 
+        ref_width ref_height target_width target_height;
+      
+      (* Test the same key points as in hybrid stacking *)
+      fprintf oc "Test points transformation (target -> reference):\n";
+      
+      let test_points = [
+        (0, 0, "Top-left corner");
+        (target_width/2, target_height/2, "Center");
+        (target_width-1, target_height-1, "Bottom-right corner");
+        (target_width/4, target_height/4, "1/4 point");
+        (3*target_width/4, 3*target_height/4, "3/4 point");
+      ] in
+      
+      List.iter (fun (x, y, label) ->
+        let src_x = float_of_int x in
+        let src_y = float_of_int y in
+        
+        (* Use WCS transform *)
+        let ref_x, ref_y = transform src_x src_y in
+        
+        fprintf oc "  %s (%d,%d) -> (%.2f,%.2f)\n" label x y ref_x ref_y;
+        
+        (* Show sky coordinates as intermediate step *)
+        let sky_ra, sky_dec = pixel_to_sky target_wcs src_x src_y in
+        fprintf oc "    Sky coordinates: (%.6f,%.6f)\n" sky_ra sky_dec;
+        
+      ) test_points;
+      
+      (* Calculate transformation properties *)
+      let calculate_astrometric_transform_properties () =
+        (* Calculate scale - the average of the two diagonal terms *)
+        let scale_x = sqrt (target_wcs.cd1_1 *. target_wcs.cd1_1 +. target_wcs.cd2_1 *. target_wcs.cd2_1) in
+        let scale_y = sqrt (target_wcs.cd1_2 *. target_wcs.cd1_2 +. target_wcs.cd2_2 *. target_wcs.cd2_2) in
+        let scale_ref_x = sqrt (ref_wcs.cd1_1 *. ref_wcs.cd1_1 +. ref_wcs.cd2_1 *. ref_wcs.cd2_1) in
+        let scale_ref_y = sqrt (ref_wcs.cd1_2 *. ref_wcs.cd1_2 +. ref_wcs.cd2_2 *. ref_wcs.cd2_2) in
+        
+        (* Calculate relative scale *)
+        let rel_scale_x = scale_ref_x /. scale_x in
+        let rel_scale_y = scale_ref_y /. scale_y in
+        
+        (* Calculate rotation angle *)
+        let target_angle = atan2 target_wcs.cd2_1 target_wcs.cd1_1 in
+        let ref_angle = atan2 ref_wcs.cd2_1 ref_wcs.cd1_1 in
+        let rotation = ref_angle -. target_angle in
+        
+        (* Calculate translation *)
+        (* Take the center of each image *)
+        let target_center_x = float_of_int target_width /. 2.0 in
+        let target_center_y = float_of_int target_height /. 2.0 in
+        
+        let sky_ra, sky_dec = pixel_to_sky target_wcs target_center_x target_center_y in
+        let ref_center_x, ref_center_y = sky_to_pixel ref_wcs sky_ra sky_dec in
+        
+        let dx = ref_center_x -. float_of_int ref_width /. 2.0 in
+        let dy = ref_center_y -. float_of_int ref_height /. 2.0 in
+        
+        (* Return properties *)
+        (scale_x, scale_y, scale_ref_x, scale_ref_y, rel_scale_x, rel_scale_y, 
+         target_angle, ref_angle, rotation, dx, dy)
+      in
+      
+      let (scale_x, scale_y, scale_ref_x, scale_ref_y, rel_scale_x, rel_scale_y,
+           target_angle, ref_angle, rotation, dx, dy) = calculate_astrometric_transform_properties () in
+      
+      fprintf oc "\nCalculated transformation properties:\n";
+      fprintf oc "  Target scale: X=%.6f, Y=%.6f arcsec/pixel\n" 
+        (scale_x *. 3600.0) (scale_y *. 3600.0);
+      fprintf oc "  Reference scale: X=%.6f, Y=%.6f arcsec/pixel\n" 
+        (scale_ref_x *. 3600.0) (scale_ref_y *. 3600.0);
+      fprintf oc "  Relative scale: X=%.6f, Y=%.6f\n" rel_scale_x rel_scale_y;
+      fprintf oc "  Target angle: %.6f rad (%.2f deg)\n" 
+        target_angle (target_angle *. 180.0 /. Float.pi);
+      fprintf oc "  Reference angle: %.6f rad (%.2f deg)\n" 
+        ref_angle (ref_angle *. 180.0 /. Float.pi);
+      fprintf oc "  Rotation: %.6f rad (%.2f deg)\n" 
+        rotation (rotation *. 180.0 /. Float.pi);
+      fprintf oc "  Translation: dx=%.2f, dy=%.2f pixels\n" dx dy;
+      
+      (* Calculate CD matrix determinants *)
+      let ref_det = ref_wcs.cd1_1 *. ref_wcs.cd2_2 -. ref_wcs.cd1_2 *. ref_wcs.cd2_1 in
+      let target_det = target_wcs.cd1_1 *. target_wcs.cd2_2 -. target_wcs.cd1_2 *. target_wcs.cd2_1 in
+      
+      fprintf oc "\nCD Matrix determinants:\n";
+      fprintf oc "  Reference: %.6e\n" ref_det;
+      fprintf oc "  Target: %.6e\n" target_det;
+      fprintf oc "  Ratio: %.6f\n" (ref_det /. target_det);
+      
+  | _ ->
+      fprintf oc "Cannot analyze transformation: missing WCS parameters\n";
+  
+  close_out oc;
+  
+  printf "Dumped astrometric transformation info to %s\n" out_file
+
 let stack_astrometric files reference_idx stacking_method output_path =
+  let reference_file = List.nth files reference_idx in
   Printf.printf "Stacking %d images using astrometric alignment...\n" (List.length files);
   flush stdout;
   
@@ -395,6 +551,9 @@ let stack_astrometric files reference_idx stacking_method output_path =
     (* Process each image *)
     List.iter (fun (file, wcs, img_width, img_height) ->
       Printf.printf "Processing %s...\n" (Filename.basename file);
+      Printf.printf "Applying astrometric alignment between %s and %s\n"
+	reference_file file;
+      dump_astrometric_transformation_info reference_file file;
       flush stdout;
       
       (* Read the image data (all 3 planes) *)
@@ -473,7 +632,7 @@ let stack_astrometric files reference_idx stacking_method output_path =
     let header = Hashtbl.create 50 in
     
     (* Get header from reference file *)
-    let ref_hdr = Fits.just_header (List.nth files reference_idx) in
+    let ref_hdr = Fits.just_header reference_file in
     
     (* Copy important keywords but enforce RGB structure *)
     List.iter (fun key ->

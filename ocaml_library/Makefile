@@ -18,7 +18,7 @@ verify: _build/default/plate_solve_cli.exe
 	env OCAMLRUNPARAM=b _build/default/plate_solve_cli.exe -workers $(WORKERS) -i rgb
 
 stack: _build/default/astrometric_stack_cli.exe
-	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -o stacked.fits solved_verification/cal_*_rgb.fits
+	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -o stacked_solved.fits solved_verification/cal_*_rgb.fits
 
 test: _build/default/fits_reader_test.exe
 	env OCAMLRUNPARAM=b _build/default/fits_reader_test.exe -f solved_verification/cal_20250217_204959_BGGR_rgb.fits
@@ -30,8 +30,8 @@ detect: _build/default/star_detection_cli.exe
 compare: _build/default/stack_comparison.exe
 	_build/default/stack_comparison.exe -ref 0 -dir rgb
 
-hybrid: _build/default/hybrid_stacking_cli.exe
-	env OCAMLRUNPARAM=b _build/default/hybrid_stacking_cli.exe -no-live-stacking -v -o stacked.fits solved_verification/cal_*_rgb.fits
+live: _build/default/live_stack_cli.exe
+	env OCAMLRUNPARAM=b _build/default/live_stack_cli.exe -ref solved_verification/cal_20250217_204343_BGGR_rgb.fits -i rgb
 
 shar:
 	(cd _build/default && shar `ls -1 *.ml *.mli | fgrep -v .pp.` > ../../archive.shar.txt)
