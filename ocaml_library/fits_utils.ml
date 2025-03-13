@@ -538,6 +538,8 @@ let extract_fits_files src_dir dest_dir =
             (* Try to get Alt/Az if available *)
             let alt = try parse_float hdrh "ALT" with _ -> 0.0 in
             let az = try parse_float hdrh "AZ" with _ -> 0.0 in
+            let derot = try parse_float hdrh "DEROT" with _ -> 0.0 in
+            let focus = try parse_int hdrh "FOCUS" with _ -> 0 in
             
             (* Create updates list *)
             let updates = [
@@ -545,6 +547,8 @@ let extract_fits_files src_dir dest_dir =
               ("MOUNTDEC", Printf.sprintf "%f" mountdec, "Mount DEC (deg)");
               ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
               ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
+              ("DEROT", Printf.sprintf "%f" derot, "Derotation (deg)");
+              ("FOCUS", Printf.sprintf "%d" focus, "Focus (units)");
             ] in
             
             (* Copy with updates *)

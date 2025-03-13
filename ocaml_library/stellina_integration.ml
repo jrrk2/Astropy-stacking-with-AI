@@ -161,6 +161,8 @@ let annotate_fits_from_json context json_path fits_path pointing_model =
     let motors = json |> member "motors" in
     let alt = motors |> member "ALT" |> to_float in
     let az = motors |> member "AZ" |> to_float in
+    let derot = motors |> member "DER" |> to_float in
+    let focus = motors |> member "MAP" |> to_int in
     
     (* Get FITS header *)
     let hdrh = just_header fits_path in
@@ -177,6 +179,8 @@ let annotate_fits_from_json context json_path fits_path pointing_model =
       ("MOUNTDEC", Printf.sprintf "%f" dec, "Mount DEC (deg)");
       ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
       ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
+      ("DEROT", Printf.sprintf "%f" derot, "Derotation (deg)");
+      ("FOCUS", Printf.sprintf "%d" focus, "Focus (units)");
     ] in
     
     (* Create output filename *)
@@ -617,6 +621,8 @@ let process_directory src_dir flags =
       let motors = json |> member "motors" in
       let alt = motors |> member "ALT" |> to_float in
       let az = motors |> member "AZ" |> to_float in
+      let derot = motors |> member "DER" |> to_float in
+      let focus = motors |> member "MAP" |> to_int in
       (* get timestamp *)
       let hdrh = just_header fits_file in
       let timestamp = get_timestamp hdrh in
@@ -668,6 +674,8 @@ let process_directory src_dir flags =
                     ("MOUNTDEC", Printf.sprintf "%f" dec, "Mount DEC (deg)");
                     ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
                     ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
+		    ("DEROT", Printf.sprintf "%f" derot, "Derotation (deg)");
+		    ("FOCUS", Printf.sprintf "%d" focus, "Focus (units)");
                   ] in
 
                   if copy_fits_with_updates fits_file new_path updates then begin

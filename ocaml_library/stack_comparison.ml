@@ -359,9 +359,9 @@ let compare_methods reference_file target_file =
       None
 
 (* Process a directory of images *)
-let process_directory reference_file image_dir output_dir =
+let process_directory reference_file_index image_dir output_dir =
   log Info (sprintf "Processing directory: %s" image_dir);
-  log Info (sprintf "Reference file: %s" reference_file);
+  log Info (sprintf "Reference file_index: %d" reference_file_index);
   log Info (sprintf "Output directory: %s" output_dir);
   
   (* Create output directory if it doesn't exist *)
@@ -377,6 +377,7 @@ let process_directory reference_file image_dir output_dir =
           Filename.check_suffix f ".fits" || 
           Filename.check_suffix f ".fit")
       |> List.map (fun f -> Filename.concat image_dir f)
+      |> List.sort compare
     with _ -> 
       log Error (sprintf "Error reading directory %s" image_dir);
       []
@@ -385,6 +386,8 @@ let process_directory reference_file image_dir output_dir =
   log Info (sprintf "Found %d FITS files" (List.length files));
   
   (* Process each file *)
+  let reference_file = try List.nth files reference_file_index with _ -> List.hd files in
+  log Info (sprintf "Reference file: %s" reference_file);
   let results = List.filter_map (fun file ->
     compare_methods reference_file file
   ) files in
@@ -558,25 +561,19 @@ let process_directory reference_file image_dir output_dir =
 (* Main function *)
 let main () =
   (* Parse command line arguments *)
-  let reference_file = ref "" in
+  let reference_file_index = ref 0 in
   let image_dir = ref "" in
   let output_dir = ref "comparison_results" in
   
   let specs = [
-    ("-ref", Arg.Set_string reference_file, "Reference image file");
+    ("-ref", Arg.Set_int reference_file_index, "Reference image file index");
     ("-dir", Arg.Set_string image_dir, "Directory containing images to align");
     ("-out", Arg.Set_string output_dir, "Output directory for results");
   ] in
   
-  let usage = "Usage: stack_comparison -ref reference.fits -dir image_directory [-out result_directory]" in
+  let usage = "Usage: stack_comparison -ref reference_fits_index -dir image_directory [-out result_directory]" in
   
   Arg.parse specs (fun _ -> ()) usage;
-  
-  if !reference_file = "" then begin
-    printf "Error: Reference file must be specified with -ref\n";
-    Arg.usage specs usage;
-    exit 1
-  end;
   
   if !image_dir = "" then begin
     printf "Error: Image directory must be specified with -dir\n";
@@ -586,7 +583,7 @@ let main () =
   
   (* Run the comparison *)
   let (plate_successes, star_successes, both_successes) = 
-    process_directory !reference_file !image_dir !output_dir in
+    process_directory !reference_file_index !image_dir !output_dir in
   
   (* Print final summary *)
   printf "\nFinal Summary:\n";

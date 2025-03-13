@@ -26,6 +26,9 @@ detect: _build/default/star_detection_cli.exe
 	-@rm -rf star_detection_results
 	_build/default/star_detection_cli.exe -workers $(WORKERS) -visualize -i solved_verification
 
+compare: _build/default/stack_comparison.exe
+	_build/default/stack_comparison.exe -ref 0 -dir rgb
+
 shar:
 	(cd _build/default && shar `ls -1 *.ml *.mli | fgrep -v .pp.` > ../../archive.shar.txt)
 
@@ -48,4 +51,7 @@ _build/default/star_detection_cli.exe:
 	dune build $@
 
 _build/default/fits_reader_test.exe:
+	dune build $@
+
+_build/default/stack_comparison.exe:
 	dune build $@
