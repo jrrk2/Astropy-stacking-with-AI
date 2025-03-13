@@ -32,6 +32,12 @@ type stellina_process_flags = {
   temp_tolerance: float;
 }
 
+type status = Roundness | StackingOK
+
+let status_msg = function
+| Roundness -> "Roundness Error"
+| StackingOK -> "OK for stacking"
+
 (* Cache for master darks to avoid rebuilding *)
 let (master_dark_cache:(int,int array array * (string, string) Hashtbl.t)Hashtbl.t) = Hashtbl.create 10
 
@@ -702,7 +708,14 @@ let process_directory src_dir flags =
   let calibrated = ref 0 in
   let registration_added = ref 0 in
   let registration_failed = ref 0 in
-  
+  let focus_flt = ref 0.0 in
+  let focus_qual = ref 0.0 in
+  let correction_x = ref 0.0 in
+  let correction_y = ref 0.0 in
+  let correction_rot = ref 0.0 in
+  let coordinates_x = ref 0.0 in
+  let coordinates_y = ref 0.0 in
+  let coordinates_rot = ref 0.0 in
   (* Process each pair *)
   List.iter (fun (json_file, fits_file, index) ->
     printf "\nProcessing index %d:\n" index;
@@ -711,13 +724,33 @@ let process_directory src_dir flags =
     
     try
       (* Parse JSON data *)
-      let json = Yojson.Basic.from_file json_file in
+      let open JsonParser in
       let open Yojson.Basic.Util in
+      let json = Yojson.Basic.from_file json_file in
+      let index = json |> member "index" |> to_int in
       let motors = json |> member "motors" in
       let alt = motors |> member "ALT" |> to_float in
       let az = motors |> member "AZ" |> to_float in
       let derot = motors |> member "DER" |> to_float in
-      let focus = motors |> member "MAP" |> to_int in
+      let focus_map = motors |> member "MAP" |> to_int in
+      let stacking = json |> member "stackingData" |> member "liveRegistrationResult" in
+      let roundness = stacking |> member "roundness" |> safe_float in
+      let status = match stacking |> member "statusMessage" |> to_string with
+	| "StackingRoundnessError" -> Roundness
+	| "StackingOk" ->
+	  correction_x := stacking |> member "correction" |> member "x" |> safe_float;
+	  correction_y := stacking |> member "correction" |> member "y" |> safe_float;
+	  correction_rot := stacking |> member "correction" |> member "rot" |> safe_float;
+	  coordinates_x := stacking |> member "coordinates" |> member "x" |> safe_float;
+	  coordinates_y := stacking |> member "coordinates" |> member "y" |> safe_float;
+	  coordinates_rot := stacking |> member "coordinates" |> member "rot" |> safe_float;
+	  if index = 0 then
+	    (
+	    focus_flt := stacking |> member "focus" |> safe_float;
+	    focus_qual := stacking |> member "focusQuality" |> safe_float;
+	    );
+          StackingOK
+	| msg -> failwith msg in
       (* get timestamp *)
       let hdrh = just_header fits_file in
       let timestamp = get_timestamp hdrh in
@@ -788,10 +821,20 @@ let process_directory src_dir flags =
                     ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
                     ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
 		    ("DEROT", Printf.sprintf "%f" derot, "Derotation (deg)");
-		    ("FOCUS", Printf.sprintf "%d" focus, "Focus (units)");
+		    ("MAP", Printf.sprintf "%d" focus_map, "Focus motor");
+		    ("FOCUS", Printf.sprintf "%f" !focus_flt, "Focus");
+		    ("FOCUSQ", Printf.sprintf "%f" !focus_qual, "Focus quality");
 		    ("HAVAL", Printf.sprintf "%f" hour_angle, "Hour angle (hours)");
-		    ("ROTRATE", Printf.sprintf "%f" (rotation_rate *. 180.0 /. Float.pi), "Field rotation rate (deg/hr)")
-                  ] in
+		    ("ROTRATE", Printf.sprintf "%f" (rotation_rate *. 180.0 /. Float.pi), "Field rotation rate (deg/hr)");
+		    ("STATUS", Printf.sprintf "%s" (status_msg status), "Stacking status");
+                    ] @ if status = StackingOK then [
+		    ("CORX", Printf.sprintf "%f" !correction_x, "Correction X");
+		    ("CORY", Printf.sprintf "%f" !correction_y, "Correction Y");
+		    ("CORROT", Printf.sprintf "%f" !correction_rot, "Correction ROT");
+		    ("COORDX", Printf.sprintf "%f" !coordinates_x, "Coordinates X");
+		    ("COORDY", Printf.sprintf "%f" !coordinates_y, "Coordinates Y");
+		    ("COORDROT", Printf.sprintf "%f" !coordinates_rot, "Coordinates ROT");
+		    ] else [] in
 
                   if copy_fits_with_updates fits_file new_path updates then begin
                     printf "  Created and annotated %s\n" new_path;
@@ -831,7 +874,7 @@ let process_directory src_dir flags =
                     end;
                     
                     (* Apply calibration if requested *)
-                    if calibrate then begin
+                    if calibrate && status = StackingOK then begin
                       match darks_dir with
                       | Some dark_dir ->
                           (* Create calibrated output path *)
