@@ -29,6 +29,7 @@ type stellina_process_flags = {
   latitude: float;
   longitude: float;
   plate_scale: float;
+  temp_tolerance: float;
 }
 
 (* Cache for master darks to avoid rebuilding *)
@@ -50,6 +51,7 @@ let default_process_flags = {
   latitude = 52.245091;
   longitude = 0.079609;
   plate_scale = 0.57;
+  temp_tolerance = 2.0;
 }
 
 (* Default analysis flags *)
@@ -149,51 +151,6 @@ let verify_coordinates context calc_ra calc_dec target_name ?(max_separation_deg
         printf "  Position OK - %.2f° from %s\n" separation_deg target_name;
       
       (is_valid, Some separation_deg, Some (target_ra, target_dec))
-
-(* Annotate FITS with JSON data - from stellina_process.ml *)
-let annotate_fits_from_json context json_path fits_path pointing_model =
-  try
-    (* Open the JSON file *)
-    let json = Yojson.Basic.from_file json_path in
-    let open Yojson.Basic.Util in
-    
-    (* Extract key data *)
-    let motors = json |> member "motors" in
-    let alt = motors |> member "ALT" |> to_float in
-    let az = motors |> member "AZ" |> to_float in
-    let derot = motors |> member "DER" |> to_float in
-    let focus = motors |> member "MAP" |> to_int in
-    
-    (* Get FITS header *)
-    let hdrh = just_header fits_path in
-    
-    (* Calculate RA/DEC from Alt/Az *)
-    let (ra, dec, _) = altaz_to_radec context alt az in
-    
-    printf "  Annotated FITS with ALT/AZ: %.2f°, %.2f° → RA/DEC: %.4f°, %.4f°\n" 
-      alt az ra dec;
-    
-    (* Create updates list *)
-    let updates = [
-      ("MOUNTRA", Printf.sprintf "%f" ra, "Mount RA (deg)");
-      ("MOUNTDEC", Printf.sprintf "%f" dec, "Mount DEC (deg)");
-      ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
-      ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
-      ("DEROT", Printf.sprintf "%f" derot, "Derotation (deg)");
-      ("FOCUS", Printf.sprintf "%d" focus, "Focus (units)");
-    ] in
-    
-    (* Create output filename *)
-    let dirname = Filename.dirname fits_path in
-    let basename = Filename.basename fits_path in
-    let annotated_file = Filename.concat dirname ("annotated_" ^ basename) in
-    
-    (* Copy with updates *)
-    copy_fits_with_updates fits_path annotated_file updates
-  with
-  | e ->
-      eprintf "  Error annotating FITS: %s\n" (Printexc.to_string e);
-      false
 
 (* Apply model correction to a FITS file *)
 let apply_model_correction model fits_path output_path =
@@ -443,7 +400,7 @@ let find_temp_bin darks_dir temp temp_tolerance =
   end
 
 (* Apply dark calibration to a light frame with caching *)
-let apply_dark_calibration darks_dir light_file output_file =
+let apply_dark_calibration darks_dir light_file output_file temp_tolerance =
   try
     (* Get temperature from light frame *)
     let hdrh = just_header light_file in
@@ -454,7 +411,6 @@ let apply_dark_calibration darks_dir light_file output_file =
       (Filename.basename light_file) temp temp_k;
     
     (* Find appropriate master dark using the temperature bin functions *)
-    let temp_tolerance = 2.0 in
     match find_temp_bin darks_dir temp temp_tolerance with
     | None -> 
         printf "  No suitable temperature bin found within %.1f°C tolerance\n" temp_tolerance;
@@ -484,6 +440,144 @@ let apply_dark_calibration darks_dir light_file output_file =
     eprintf "  Error applying dark calibration: %s\n" (Printexc.to_string e);
     false
 
+let analyze_field_rotation_from_headers files =
+  printf "\nAnalyzing field rotation from FITS headers...\n";
+  
+  (* Only select RGB calibrated files *)
+  let rgb_files = List.filter (fun file ->
+    let basename = Filename.basename file in
+    String.length basename >= 7 && 
+    String.sub basename 0 3 = "cal" && 
+    String.contains basename '_' && 
+    String.contains basename 'r' && 
+    String.contains basename 'g' && 
+    String.contains basename 'b'
+  ) files in
+  
+  printf "  Selected %d calibrated RGB files for analysis\n" (List.length rgb_files);
+  
+  (* Sort files by timestamp *)
+  let sorted_files = List.sort compare rgb_files in
+  
+  (* Extract rotation data from FITS headers *)
+  let rotation_data = List.filter_map (fun file ->
+    try
+      let hdrh = Fits.just_header file in
+      
+      (* Extract timestamp *)
+      let timestamp = Util.get_timestamp hdrh in
+      
+      (* Extract ALT/AZ, DEROT, and calculated rotation rate *)
+      let alt = parse_float hdrh "ALT" in
+      let az = parse_float hdrh "AZ" in
+      let derot = parse_float hdrh "DEROT" in
+      let rot_rate = parse_float hdrh "ROTRATE" in
+      
+      Some { 
+        timestamp;
+        alt;
+        az;
+        derot;
+        rot_rate = Some rot_rate;
+        filename = Filename.basename file 
+      }
+    with e -> 
+      printf "  Could not process %s: %s\n" 
+        (Filename.basename file) (Printexc.to_string e);
+      None
+  ) sorted_files in
+    
+  (* Sort by timestamp *)
+  let sorted_data = List.sort (fun (a:rotation_data_item) (b:rotation_data_item) -> compare a.timestamp b.timestamp) rotation_data in
+  
+  (* Analyze field rotation between consecutive frames *)
+  if List.length sorted_data > 1 then begin
+    printf "Field Rotation Analysis:\n";
+    printf "%-20s %-10s %-8s %-8s %-10s %-14s %-14s\n" 
+      "Image" "Time" "ALT" "AZ" "DEROT" "Rot Rate" "Est Rot";
+    
+    (* Keep track of previous frame for comparison *)
+    let prev_frame = ref None in
+    
+    (* Calculate expected and actual rotations between consecutive frames *)
+      let rotations = List.filter_map (fun (frame:rotation_data_item) ->
+
+      (* Format timestamp *)
+      let time_str = 
+        let tm = Unix.localtime frame.timestamp in
+        sprintf "%02d:%02d:%02d" tm.Unix.tm_hour tm.Unix.tm_min tm.Unix.tm_sec
+      in
+      
+      match !prev_frame with
+      | Some (prev:rotation_data_item) ->
+          (* Time difference in hours *)
+          let time_diff_hours = (frame.timestamp -. prev.timestamp) /. 3600.0 in
+          
+          (* Actual derotator change *)
+          let derot_change = frame.derot -. prev.derot in
+          
+          (* Expected rotation based on rotation rate *)
+          let expected_rotation = 
+            match prev.rot_rate with
+            | Some rate -> rate *. time_diff_hours
+            | None -> 0.0
+          in
+          
+          printf "%-20s %-10s %8.2f %8.2f %10.2f %14.2f %14.2f\n" 
+            frame.filename time_str frame.alt frame.az frame.derot
+            (match frame.rot_rate with Some r -> r | None -> 0.0)
+            expected_rotation;
+          
+          prev_frame := Some frame;
+          Some (derot_change, expected_rotation)
+          
+      | None ->
+          printf "%-20s %-10s %8.2f %8.2f %10.2f %14.2f %14s\n" 
+            frame.filename time_str frame.alt frame.az frame.derot
+            (match frame.rot_rate with Some r -> r | None -> 0.0)
+            "-";
+          
+          prev_frame := Some frame;
+          None
+    ) sorted_data in
+    
+    (* Calculate statistics *)
+    if List.length rotations > 0 then begin
+      let derot_changes = List.map fst rotations in
+      let expected_rots = List.map snd rotations in
+      
+      (* Calculate differences (should be near zero if DEROT compensates perfectly) *)
+      let differences = List.map2 (fun derot_change expected_rot -> 
+        derot_change +. expected_rot
+      ) derot_changes expected_rots in
+      
+      let avg_diff = List.fold_left (+.) 0.0 differences /. float_of_int (List.length differences) in
+      let max_diff = List.fold_left max (List.hd differences) differences in
+      let min_diff = List.fold_left min (List.hd differences) differences in
+      
+      printf "\nStatistics:\n";
+      printf "Average DEROT difference from theoretical rotation: %.3f degrees\n" avg_diff;
+      printf "Range: %.3f to %.3f degrees\n" min_diff max_diff;
+      
+      (* Determine the relationship between DEROT and field rotation *)
+      if abs_float avg_diff < 1.0 then
+        printf "\nThe DEROT value appears to directly compensate for field rotation (DEROT = -fieldRotation)\n"
+      else if abs_float (avg_diff -. 180.0) < 1.0 || abs_float (avg_diff +. 180.0) < 1.0 then
+        printf "\nThe DEROT value appears to be offset by 180° from field rotation\n"
+      else
+        printf "\nThe DEROT value has an average offset of %.2f° from the theoretical field rotation\n" avg_diff;
+      
+      (* Return the statistics *)
+      Some (avg_diff, min_diff, max_diff)
+    end else begin
+      printf "Not enough data points to calculate statistics\n";
+      None
+    end
+  end else begin
+    printf "Not enough data to analyze field rotation (need at least 2 frames)\n";
+    None
+end
+
 (* Process directory with enhanced error handling - from stellina_process.ml *)
 let process_directory src_dir flags =
   let {
@@ -501,6 +595,7 @@ let process_directory src_dir flags =
     latitude;
     longitude;
     plate_scale;
+    temp_tolerance;
   } = flags in
 
   let local_context = create_context latitude longitude in
@@ -551,7 +646,7 @@ let process_directory src_dir flags =
   
   (* Find all files in directory *)
   let files = 
-    try Array.to_list (Sys.readdir src_dir)
+    try List.sort compare (Array.to_list (Sys.readdir src_dir))
     with e -> 
       eprintf "Error reading directory %s: %s\n" src_dir (Printexc.to_string e);
       []
@@ -668,6 +763,24 @@ let process_directory src_dir flags =
                 
                 (* Copy file if doesn't exist *)
                 if not (Sys.file_exists new_path) then begin
+
+		  (* Calculate theoretical field rotation rate at this position *)
+		  let rotation_rate = calc_field_rotation_rate 
+		    ~latitude:context.latitude 
+		    ~altitude:alt 
+		    ~azimuth:az in
+
+		  (* Calculate hour angle explicitly for verification *)
+		  let hour_angle = calc_hour_angle 
+		    ~timestamp 
+		    ~longitude:context.longitude 
+		    ~ra in
+
+		  printf "  Annotated FITS with ALT/AZ: %.2f°, %.2f° → RA/DEC: %.4f°, %.4f°\n" 
+		    alt az ra dec;
+		  printf "  Hour angle: %.4f hours, Field rotation rate: %.4f°/hr\n" 
+		    hour_angle (rotation_rate *. 180.0 /. Float.pi);
+		  
                   (* Create updates list *)
                   let updates = [
                     ("MOUNTRA", Printf.sprintf "%f" ra, "Mount RA (deg)");
@@ -676,6 +789,8 @@ let process_directory src_dir flags =
                     ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
 		    ("DEROT", Printf.sprintf "%f" derot, "Derotation (deg)");
 		    ("FOCUS", Printf.sprintf "%d" focus, "Focus (units)");
+		    ("HAVAL", Printf.sprintf "%f" hour_angle, "Hour angle (hours)");
+		    ("ROTRATE", Printf.sprintf "%f" (rotation_rate *. 180.0 /. Float.pi), "Field rotation rate (deg/hr)")
                   ] in
 
                   if copy_fits_with_updates fits_file new_path updates then begin
@@ -732,7 +847,7 @@ let process_directory src_dir flags =
                                 create_dir cal_dir;
                                 
                               (* Apply the calibration with caching *)
-                              if apply_dark_calibration dark_dir new_path calibrated_path then begin
+                              if apply_dark_calibration dark_dir new_path calibrated_path temp_tolerance then begin
                                 printf "  Successfully calibrated image\n";
                                 calibrated := !calibrated + 1;
 				flush stdout
@@ -765,6 +880,38 @@ let process_directory src_dir flags =
         eprintf "  Error reading files: %s\n" (Printexc.to_string e);
         errors := !errors + 1
   ) !pairs;
+
+  (* In the process_directory function, after all files are processed *)
+  (* Near the end, where you print the summary, add: *)
+
+  (* Analyze field rotation across processed files *)
+  if !processed > 1 then begin
+    printf "\n=== Field Rotation Analysis ===\n";
+
+    (* Find all processed files *)
+    let processed_files = ref [] in
+    let rec check_dir dir =
+      try
+	Array.iter (fun entry ->
+	  let full_path = Filename.concat dir entry in
+	  if Sys.is_directory full_path then
+	    (* Recursively check subdirectories *)
+	    check_dir full_path
+	  else if Filename.check_suffix entry ".fits" then
+	    processed_files := full_path :: !processed_files
+	) (Sys.readdir dir)
+      with _ -> ()
+    in
+
+    check_dir base_dir;
+
+    if List.length !processed_files > 0 then begin
+      ignore (analyze_field_rotation_from_headers !processed_files);
+    end else
+      printf "No processed FITS files found for rotation analysis\n";
+
+    printf "=== Field Rotation Analysis Complete ===\n\n";
+  end;
   
   (* Print master dark cache statistics *)
   let cache_size = Hashtbl.length master_dark_cache in
@@ -822,7 +969,7 @@ let process_with_dark_calibration darks_dir light_dir output_dir temp_tolerance 
       printf "Processing %s...\n" basename;
       
       (* Apply calibration *)
-      if apply_dark_calibration darks_dir light_file output_path then begin
+      if apply_dark_calibration darks_dir light_file output_path temp_tolerance then begin
         printf "Successfully calibrated to %s\n" output_path;
         incr processed
       end else begin
@@ -865,6 +1012,8 @@ let main () =
   let pointing_model = ref None in
   let verify_model = ref false in
   let plate_scale = ref 0.57 in
+  let temp_tolerance = ref 2.0 in
+  let analyze_rotation = ref false in
   
   let speclist = [
     ("--output", Arg.Set_string output, "Base output directory");
@@ -884,6 +1033,11 @@ let main () =
     ("--verify-model", Arg.Set verify_model, "Verify pointing model accuracy with plate solving");
     ("--plate-scale", Arg.Set_float plate_scale, 
       "Plate scale in arcseconds per pixel (default: 0.57 for Stellina)");
+    ("--temp-tolerance", Arg.Set_float temp_tolerance, 
+      "Temperature tolerance for dark frame matching (default: 2.0)");
+    ("--analyze-rotation", Arg.Set analyze_rotation, 
+     "Analyze field rotation and derotator performance in processed files");
+
   ] in
   
   let anon_fun arg = directory := arg in
@@ -895,7 +1049,37 @@ let main () =
     Arg.usage speclist usage;
     exit 1
   end;
-  
+
+  (* If analyze_rotation flag is set, just run that analysis and exit *)
+  if !analyze_rotation then begin
+
+    (* Find all FITS files recursively *)
+    let files = ref [] in
+    let rec find_fits dir =
+      try
+	Array.iter (fun entry ->
+	  let full_path = Filename.concat dir entry in
+	  if Sys.is_directory full_path then
+	    find_fits full_path
+	  else if Filename.check_suffix entry ".fits" then
+	    files := full_path :: !files
+	) (Sys.readdir dir)
+      with _ -> ()
+    in
+
+    find_fits !directory;
+
+    if List.length !files > 0 then begin
+      printf "Analyzing field rotation in %d FITS files from %s\n" 
+	(List.length !files) !directory;
+      ignore (analyze_field_rotation_from_headers !files);
+      exit 0
+    end else begin
+      printf "No FITS files found in %s\n" !directory;
+      exit 1
+    end
+  end;
+
   (* Verify target if specified *)
   begin match !target with
   | None -> ()
@@ -924,6 +1108,7 @@ let main () =
     latitude = !lat;
     longitude = !lon;
     plate_scale = !plate_scale;
+    temp_tolerance = !temp_tolerance;
   } in
   
   let (processed, skipped, errors, calibrated, registration_added, registration_failed) =

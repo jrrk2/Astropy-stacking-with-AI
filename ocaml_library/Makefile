@@ -8,7 +8,7 @@ all: integrate verify stack
 
 integrate: _build/default/stellina_integration.exe
 	-@rm -rf lights rgb
-	env OCAMLRUNPARAM=b _build/default/stellina_integration.exe --calibrate --darks-dir ../../dark_temps --lat $(LAT) --lon $(LONG) --target $(TARGET) $(LIGHTDIR)/02-images-initial
+	env OCAMLRUNPARAM=b _build/default/stellina_integration.exe --calibrate --darks-dir ../../dark_temps --temp-tolerance 8.0 --lat $(LAT) --lon $(LONG) --target $(TARGET) $(LIGHTDIR)/02-images-initial
 	@mkdir rgb
 	mv lights/temp_*/cal_*_rgb.fits rgb
 

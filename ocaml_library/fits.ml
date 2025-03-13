@@ -415,7 +415,8 @@ let copy_fits_with_updates source_path target_path updates =
     (* Read original header to determine its size *)
     let fd = open_in_bin source_path in
     let header = read_header fd "" in
-    
+    close_in fd;
+
     (* Create new header string from hash table *)
     let new_header = Bytes.create (((String.length header / 2880) + 1) * 2880) in
     Bytes.fill new_header 0 (Bytes.length new_header) ' ';

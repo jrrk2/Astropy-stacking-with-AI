@@ -87,6 +87,80 @@ let altaz_to_radec context alt az =
   
   ra2000, dec2000, ha_now
 
+(* Add these functions to unified_interface.ml after the existing coordinate conversion functions *)
+
+(* Calculate field rotation rate at a specific ALT/AZ position 
+   Returns rotation rate in radians per hour *)
+let calc_field_rotation_rate ~latitude ~altitude ~azimuth =
+  let lat_rad = latitude *. Float.pi /. 180.0 in
+  let alt_rad = altitude *. Float.pi /. 180.0 in
+  let az_rad = azimuth *. Float.pi /. 180.0 in
+  
+  (* Field rotation rate formula for alt-azimuth mounted telescope *)
+  -1.0 *. (cos lat_rad) *. (sin az_rad) /. (cos alt_rad) *. 15.0  (* 15 deg/hour = Earth rotation rate *)
+
+(* Calculate field rotation rate using equatorial coordinates *)
+let calc_field_rotation_rate_eq ~latitude ~declination ~hour_angle =
+  let lat_rad = latitude *. Float.pi /. 180.0 in
+  let dec_rad = declination *. Float.pi /. 180.0 in
+  let ha_rad = hour_angle *. Float.pi /. 12.0 in  (* Convert hour angle to radians *)
+  
+  let numerator = cos(lat_rad) *. cos(dec_rad) *. sin(ha_rad) in
+  let denominator = sin(lat_rad) *. sin(dec_rad) +. cos(lat_rad) *. cos(dec_rad) *. cos(ha_rad) in
+  
+  numerator /. denominator *. 15.0  (* in radians per hour *)
+
+(* Calculate hour angle from timestamp, longitude, and RA *)
+let calc_hour_angle ~timestamp ~longitude ~ra =
+  let tm = Unix.gmtime timestamp in
+  let jd = Altaz.computeTheJulianDay true (tm.Unix.tm_year + 1900) (tm.Unix.tm_mon + 1) tm.Unix.tm_mday +. 
+           float_of_int(tm.Unix.tm_hour*3600 + tm.Unix.tm_min*60 + tm.Unix.tm_sec) /. 86400.0 in
+  
+  (* Calculate Local Sidereal Time using Altaz module functions *)
+  let lst = Altaz.local_siderial_time' longitude (jd -. Altaz.jd_2000) in
+  
+  (* Hour angle = LST - RA (in hours) *)
+  let ha = lst -. (ra /. 15.0) in
+  
+  (* Normalize to -12..+12 range *)
+  let ha = 
+    if ha > 12.0 then ha -. 24.0
+    else if ha < -12.0 then ha +. 24.0
+    else ha
+  in
+  ha
+
+(* Calculate expected field rotation between two timestamps using ALT/AZ coordinates *)
+let calc_expected_field_rotation_altaz ~latitude ~alt_start ~az_start ~alt_end ~az_end ~time_diff_hours =
+  (* Calculate rotation rates at start and end positions *)
+  let rate_start = calc_field_rotation_rate ~latitude ~altitude:alt_start ~azimuth:az_start in
+  let rate_end = calc_field_rotation_rate ~latitude ~altitude:alt_end ~azimuth:az_end in
+  
+  (* Average rotation rate times time diff gives total rotation in radians *)
+  let total_rotation = ((rate_start +. rate_end) /. 2.0) *. time_diff_hours in
+  
+  (* Return in degrees for easier comparison with DEROT *)
+  total_rotation *. 180.0 /. Float.pi
+
+(* Calculate expected field rotation between two timestamps using RA/DEC coordinates *)
+let calc_expected_field_rotation_eq ~latitude ~longitude ~ra ~dec ~time_start ~time_end =
+  (* Convert timestamps to hour angles *)
+  let ha_start = calc_hour_angle ~timestamp:time_start ~longitude ~ra in
+  let ha_end = calc_hour_angle ~timestamp:time_end ~longitude ~ra in
+  
+  (* Calculate rotation rates at start and end *)
+  let rate_start = calc_field_rotation_rate_eq ~latitude ~declination:dec ~hour_angle:ha_start in
+  let rate_end = calc_field_rotation_rate_eq ~latitude ~declination:dec ~hour_angle:ha_end in
+  
+  (* Calculate time difference in hours *)
+  let time_diff_hours = (time_end -. time_start) /. 3600.0 in
+  
+  (* Average rotation rate times time diff gives total rotation in radians *)
+  let total_rotation = ((rate_start +. rate_end) /. 2.0) *. time_diff_hours in
+  
+  (* Return in degrees for easier comparison with DEROT *)
+  total_rotation *. 180.0 /. Float.pi
+
 (* Load a pointing model with option to convert from altaz model *)
 let load_pointing_model filename =
   load_model_from_file filename

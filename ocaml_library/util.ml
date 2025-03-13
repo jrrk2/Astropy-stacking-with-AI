@@ -121,7 +121,7 @@ let analyze_frames files flags =
   
   (* Analyze all frames *)
   let all_stats = Array.map analyze_frame files in
-  Array.sort (fun a b -> compare a.timestamp b.timestamp) all_stats;
+  Array.sort (fun (a:frame_stats) (b:frame_stats) -> compare a.timestamp b.timestamp) all_stats;
   
   (* Filter by temperature range if specified *)
   let stats = filter_by_temp_range all_stats flags.temp_range in
@@ -137,7 +137,7 @@ let analyze_frames files flags =
     printf "===================\n";
     printf "Temperature(°C)  RA  DEC  Timestamp\n";
     let datum = ref (Unix.gettimeofday()) in  
-    Array.iter (fun s -> if !datum > s.timestamp then datum := s.timestamp;
+    Array.iter (fun (s:frame_stats) -> if !datum > s.timestamp then datum := s.timestamp;
     ) stats;
     Array.iter (fun s ->
       printf "%8.1f        %8.4f         %8.4f         %8.4f         %8.4f         %8.1f\n" 

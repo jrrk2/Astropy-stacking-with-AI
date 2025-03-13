@@ -179,6 +179,15 @@ type star_match = {
   confidence: float;        (* Confidence score 0-1 *)
 }
 
+type rotation_data_item = {
+  timestamp: float;
+  alt: float;
+  az: float;
+  derot: float;
+  rot_rate: float option;
+  filename: string;
+}
+
 (* Implementation of List.take function *)
 module List = struct
   include List  (* Include all the standard List module functions *)
