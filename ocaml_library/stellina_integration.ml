@@ -757,7 +757,7 @@ let process_directory src_dir flags =
 	      (
 		  (* Store all 9 elements for completeness *)
 		  let m = Array.init 9 (fun ix -> Yojson.Basic.Util.index ix mat |> safe_float) in
-		  let pixel_scale_deg_per_pix = (2.4e-6 /. 400e-3) *. (180.0 /. Float.pi) in  (* Calculate from your telescope specs *)
+		  let pixel_scale_deg_per_pix = (2.4e-6 /. 400e-3) *. (180.0 /. Float.pi) *. 2.0 in  (* Calculate from your telescope specs *)
 		  let pixel_scale = pixel_scale_deg_per_pix *. 3600.0 in  (* 2.47 arcsec/pixel *)
 		  (* Convert 3×3 affine matrix to WCS-compatible scaled 2×2 matrix *)
 		  let cd1_1_scaled = m.(0) *. pixel_scale_deg_per_pix in
@@ -766,19 +766,19 @@ let process_directory src_dir flags =
 		  let cd2_2_scaled = m.(4) *. pixel_scale_deg_per_pix in
 		  StackingOK,
 		  [
-		    ("CD1_1S", Printf.sprintf "%f" cd1_1_scaled, "Scaled telescope matrix element 1,1");
-		    ("CD1_2S", Printf.sprintf "%f" cd1_2_scaled, "Scaled telescope matrix element 1,2");
-		    ("CD2_1S", Printf.sprintf "%f" cd2_1_scaled, "Scaled telescope matrix element 2,1");
-		    ("CD2_2S", Printf.sprintf "%f" cd2_2_scaled, "Scaled telescope matrix element 2,2");
-		    ("CD1_1M", Printf.sprintf "%f" m.(0), "Transformation matrix element 1,1");
-		    ("CD1_2M", Printf.sprintf "%f" m.(1), "Transformation matrix element 1,2");
-		    ("CD1_3M", Printf.sprintf "%f" m.(2), "Transformation matrix element 1,3");
-		    ("CD2_1M", Printf.sprintf "%f" m.(3), "Transformation matrix element 2,1");
-		    ("CD2_2M", Printf.sprintf "%f" m.(4), "Transformation matrix element 2,2");
-		    ("CD2_3M", Printf.sprintf "%f" m.(5), "Transformation matrix element 2,3");
-		    ("CD3_1M", Printf.sprintf "%f" m.(6), "Transformation matrix element 3,1");
-		    ("CD3_2M", Printf.sprintf "%f" m.(7), "Transformation matrix element 3,2");
-		    ("CD3_3M", Printf.sprintf "%f" m.(8), "Transformation matrix element 3,3");
+		    ("CD1_1S", Printf.sprintf "%.9f" cd1_1_scaled, "Scaled telescope matrix element 1,1");
+		    ("CD1_2S", Printf.sprintf "%.9f" cd1_2_scaled, "Scaled telescope matrix element 1,2");
+		    ("CD2_1S", Printf.sprintf "%.9f" cd2_1_scaled, "Scaled telescope matrix element 2,1");
+		    ("CD2_2S", Printf.sprintf "%.9f" cd2_2_scaled, "Scaled telescope matrix element 2,2");
+		    ("CD1_1M", Printf.sprintf "%.9f" m.(0), "Transformation matrix element 1,1");
+		    ("CD1_2M", Printf.sprintf "%.9f" m.(1), "Transformation matrix element 1,2");
+		    ("CD1_3M", Printf.sprintf "%.9f" m.(2), "Transformation matrix element 1,3");
+		    ("CD2_1M", Printf.sprintf "%.9f" m.(3), "Transformation matrix element 2,1");
+		    ("CD2_2M", Printf.sprintf "%.9f" m.(4), "Transformation matrix element 2,2");
+		    ("CD2_3M", Printf.sprintf "%.9f" m.(5), "Transformation matrix element 2,3");
+		    ("CD3_1M", Printf.sprintf "%.9f" m.(6), "Transformation matrix element 3,1");
+		    ("CD3_2M", Printf.sprintf "%.9f" m.(7), "Transformation matrix element 3,2");
+		    ("CD3_3M", Printf.sprintf "%.9f" m.(8), "Transformation matrix element 3,3");
 		  ]
 	      )
 	    )
@@ -860,12 +860,12 @@ let process_directory src_dir flags =
 		    ("ROTRATE", Printf.sprintf "%f" (rotation_rate *. 180.0 /. Float.pi), "Field rotation rate (deg/hr)");
 		    ("STATUS", Printf.sprintf "%s" (status_msg status), "Stacking status");
                     ] @ if status = StackingOK then matrix_elements @ [
-		    ("CORX", Printf.sprintf "%f" !correction_x, "Correction X");
-		    ("CORY", Printf.sprintf "%f" !correction_y, "Correction Y");
-		    ("CORROT", Printf.sprintf "%f" !correction_rot, "Correction ROT");
-		    ("COORDX", Printf.sprintf "%f" !coordinates_x, "Coordinates X");
-		    ("COORDY", Printf.sprintf "%f" !coordinates_y, "Coordinates Y");
-		    ("COORDROT", Printf.sprintf "%f" !coordinates_rot, "Coordinates ROT");
+		    ("CORX", Printf.sprintf "%9f" !correction_x, "Correction X");
+		    ("CORY", Printf.sprintf "%.9f" !correction_y, "Correction Y");
+		    ("CORROT", Printf.sprintf "%.9f" !correction_rot, "Correction ROT");
+		    ("COORDX", Printf.sprintf "%.9f" !coordinates_x, "Coordinates X");
+		    ("COORDY", Printf.sprintf "%.9f" !coordinates_y, "Coordinates Y");
+		    ("COORDROT", Printf.sprintf "%.9f" !coordinates_rot, "Coordinates ROT");
 		    ] else [] in
 
                   if copy_fits_with_updates fits_file new_path updates then begin
