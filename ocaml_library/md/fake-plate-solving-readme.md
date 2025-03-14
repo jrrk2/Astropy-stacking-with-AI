@@ -6,7 +6,6 @@ A command-line tool for writing proper WCS (World Coordinate System) headers to 
 
 - Extracts live stacking coordinates from FITS headers
 - Converts these coordinates to standard WCS (World Coordinate System) parameters
-- Handles both J2000 and JNow coordinate epochs
 - Writes the WCS parameters to output FITS files
 - Can process individual files or entire directories
 - Uses a reference plate-solved image to establish initial astrometric calibration
@@ -14,7 +13,7 @@ A command-line tool for writing proper WCS (World Coordinate System) headers to 
 ## Usage
 
 ```bash
-./live_stack_cli.exe -ref reference.fits -i input_path [-o output_path] [-v] [-epoch j2000|jnow]
+./live_stack_cli.exe -ref reference.fits -i input_path [-o output_path] [-v]
 ```
 
 ### Arguments
@@ -23,7 +22,6 @@ A command-line tool for writing proper WCS (World Coordinate System) headers to 
 - `-i` : Input file or directory containing FITS files with live stacking data
 - `-o` : (Optional) Output file or directory for the WCS-enabled FITS files. If not specified, defaults to "wcs_output" in the same directory as the input
 - `-v` : (Optional) Enable verbose output for debugging
-- `-epoch` : (Optional) Specify the epoch of mount coordinates (j2000 or jnow, default: j2000)
 
 ## Live Stacking Format
 

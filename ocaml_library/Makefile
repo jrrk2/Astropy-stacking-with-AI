@@ -30,8 +30,11 @@ detect: _build/default/star_detection_cli.exe
 compare: _build/default/stack_comparison_cli.exe
 	_build/default/stack_comparison_cli.exe -ref 0 -dir rgb
 
-cmpfits: _build/default/fits_compare.exe
-	_build/default/fits_compare.exe -ref solved_verification -cmp wcs_output
+cmpfits: _build/default/fits_compare_cli.exe
+	_build/default/fits_compare_cli.exe -ref solved_verification -cmp wcs_output
+
+cmpfitsext: _build/default/fits_compare_extension.exe
+	env PLPLOT_USE_DATA_DIR=1 _build/default/fits_compare_extension.exe -v -ref solved_verification -cmp wcs_output
 
 live: _build/default/live_stack_cli.exe
 	env OCAMLRUNPARAM=b _build/default/live_stack_cli.exe -ref solved_verification/cal_20250217_204343_BGGR_rgb.fits -i rgb
@@ -66,5 +69,8 @@ _build/default/stack_comparison_cli.exe:
 _build/default/live_stack_cli.exe:
 	dune build $@
 
-_build/default/fits_compare.exe:
+_build/default/fits_compare_cli.exe:
+	dune build $@
+
+_build/default/fits_compare_extension.exe:
 	dune build $@

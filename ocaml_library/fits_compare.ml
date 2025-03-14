@@ -393,6 +393,3 @@ let main () =
     printf "Error: Both inputs must be the same type (either both files or both directories)\n";
     exit 1
   end
-  
-(* Run the main function *)
-let () = main ()

@@ -69,9 +69,14 @@
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis plate_solve_verification parallel_plate_solve rgb_star_alignment astrometric_alignment stack_comparison live_stack_cli))
 
 (executable
-  (name fits_compare)
+  (name fits_compare_cli)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
-  (modules fits util fits_compare))
+  (modules fits util fits_compare fits_compare_cli))
+
+(executable
+  (name fits_compare_extension)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
+  (modules fits util fits_matrix_plotter fits_transform_analysis fits_compare fits_compare_extension))
 
 (library
   (name types)
