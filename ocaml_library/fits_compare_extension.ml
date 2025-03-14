@@ -279,11 +279,8 @@ let plot_coord_rot_vs_cd_rot comparison_results output_file =
     let x_reg = [| x_min; x_max |] in
     let y_reg = [| slope *. x_min +. intercept; slope *. x_max +. intercept |] in
     
-    (* Initialize PLplot - use command line args instead of interactive prompt *)
-    let args = [|"plots"; "-dev"; "pngcairo"; "-o"; output_file|] in
-    plparseopts args [PL_PARSE_FULL];
-    
-    (* Initialize after parsing options *)
+    plsdev "pngcairo";
+    plsfnam output_file;
     plinit ();
     
     (* Set background color *)
@@ -388,11 +385,8 @@ let plot_cd1_1_vs_cd1_2 comparison_results output_file =
     let y_min = y_min -. 0.05 *. y_range in
     let y_max = y_max +. 0.05 *. y_range in
     
-    (* Initialize PLplot - use command line args instead of interactive prompt *)
-    let args = [|"plots"; "-dev"; "pngcairo"; "-o"; output_file|] in
-    plparseopts args [PL_PARSE_FULL];
-    
-    (* Initialize after parsing options *)
+    plsdev "pngcairo";
+    plsfnam output_file;
     plinit ();
     
     (* Set background color *)
@@ -460,9 +454,9 @@ let plot_cd1_1_vs_cd1_2 comparison_results output_file =
       false
     end else begin
       (* Initialize plot *)
-      plinit ();
       plsdev "pngcairo";
       plsfnam output_file;
+      plinit ();
       
       (* Create arrays *)
       let n = List.length points in
