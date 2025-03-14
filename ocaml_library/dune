@@ -79,6 +79,11 @@
   (modules fits util fits_matrix_plotter fits_transform_analysis fits_compare fits_compare_extension))
  
 (executable
+  (name fits_matrix_comparison)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
+  (modules fits util fits_matrix_plotter fits_transform_analysis fits_compare fits_matrix_comparison))
+ 
+(executable
   (name detailed_frame_analysis)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
   (modules fits util fits_matrix_plotter fits_transform_analysis fits_compare detailed_frame_analysis))

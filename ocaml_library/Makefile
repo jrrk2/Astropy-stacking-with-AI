@@ -33,8 +33,8 @@ compare: _build/default/stack_comparison_cli.exe
 cmpfits: _build/default/fits_compare_cli.exe
 	_build/default/fits_compare_cli.exe -ref solved_verification -cmp wcs_output
 
-cmpfitsext: _build/default/fits_compare_extension.exe
-	env PLPLOT_USE_DATA_DIR=1 _build/default/fits_compare_extension.exe -v -ref solved_verification -cmp wcs_output
+cmpfitsext: _build/default/fits_matrix_comparison.exe
+	env PLPLOT_USE_DATA_DIR=1 _build/default/fits_matrix_comparison.exe -mode sequence solved_verification/*.fits
 
 live: _build/default/live_stack_cli.exe
 	env OCAMLRUNPARAM=b _build/default/live_stack_cli.exe -ref solved_verification/cal_20250217_204343_BGGR_rgb.fits -i rgb
@@ -76,6 +76,9 @@ _build/default/fits_compare_cli.exe:
 	dune build $@
 
 _build/default/fits_compare_extension.exe:
+	dune build $@
+
+_build/default/fits_matrix_comparison.exe:
 	dune build $@
 
 _build/default/detailed_frame_analysis.exe:
