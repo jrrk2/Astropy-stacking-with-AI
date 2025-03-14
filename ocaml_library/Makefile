@@ -18,7 +18,10 @@ verify: _build/default/plate_solve_cli.exe
 	env OCAMLRUNPARAM=b _build/default/plate_solve_cli.exe -workers $(WORKERS) -i rgb
 
 stack: _build/default/astrometric_stack_cli.exe
-	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -o stacked_live.fits wcs_output/cal_*_rgb_wcs.fits
+	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -align plate-solved -o stacked_astro.fits solved_verification/cal_*_rgb.fits
+
+live: _build/default/astrometric_stack_cli.exe
+	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -align live-stack -o stacked_live.fits rgb/cal_*_rgb.fits
 
 test: _build/default/fits_reader_test.exe
 	env OCAMLRUNPARAM=b _build/default/fits_reader_test.exe -f solved_verification/cal_20250217_204959_BGGR_rgb.fits
@@ -36,7 +39,7 @@ cmpfits: _build/default/fits_compare_cli.exe
 cmpfitsext: _build/default/fits_matrix_comparison.exe
 	env PLPLOT_USE_DATA_DIR=1 _build/default/fits_matrix_comparison.exe -mode sequence solved_verification/*.fits
 
-live: _build/default/live_stack_cli.exe
+oldlive: _build/default/live_stack_cli.exe
 	env OCAMLRUNPARAM=b _build/default/live_stack_cli.exe -ref solved_verification/cal_20250217_204343_BGGR_rgb.fits -i rgb
 
 detail: _build/default/detailed_frame_analysis.exe

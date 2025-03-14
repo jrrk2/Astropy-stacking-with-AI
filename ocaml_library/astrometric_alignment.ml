@@ -3,19 +3,6 @@ open Types
 open Fits
 open Printf
 
-(* WCS parameters from plate solved FITS headers *)
-type wcs_params = {
-  crpix1: float;     (* X reference pixel *)
-  crpix2: float;     (* Y reference pixel *)
-  crval1: float;     (* RA at reference pixel (degrees) *)
-  crval2: float;     (* DEC at reference pixel (degrees) *)
-  cd1_1: float;      (* Transformation matrix element *)
-  cd1_2: float;      (* Transformation matrix element *)
-  cd2_1: float;      (* Transformation matrix element *)
-  cd2_2: float;      (* Transformation matrix element *)
-  equinox: float;    (* Equinox of coordinates *)
-}
-
 let print_memory_usage label =
   let stat = Gc.stat () in
   print_endline (Printf.sprintf "%s: Heap words: %d, Live words: %d, Free words: %d\n" 
@@ -72,7 +59,7 @@ let extract_wcs_params header =
     None
 
 (* Convert pixel coordinates to sky coordinates (RA/Dec) *)
-let pixel_to_sky wcs x y =
+let pixel_to_sky (wcs:wcs_params_solved) x y =
   (* Convert pixel coordinates to 0-based *)
   let x_pix = x +. 1.0 -. wcs.crpix1 in
   let y_pix = y +. 1.0 -. wcs.crpix2 in
@@ -88,7 +75,7 @@ let pixel_to_sky wcs x y =
   (ra, dec)
 
 (* Convert sky coordinates (RA/Dec) to pixel coordinates *)
-let sky_to_pixel wcs ra dec =
+let sky_to_pixel (wcs:wcs_params_solved) ra dec =
   (* Calculate offsets from reference point *)
   let ra_offset = ra -. wcs.crval1 in
   let dec_offset = dec -. wcs.crval2 in
@@ -116,7 +103,7 @@ let sky_to_pixel wcs ra dec =
   (x, y)
 
 (* Create a transformation function from one WCS to another *)
-let create_wcs_transform src_wcs dst_wcs =
+let create_wcs_transform src_wcs (dst_wcs:wcs_params_solved) =
   (fun x y ->
     (* Convert source pixel to sky coordinates *)
     let ra, dec = pixel_to_sky src_wcs x y in
@@ -197,7 +184,7 @@ let calculate_stack_dimensions files =
     failwith "No valid plate-solved images found";
   
   (* Calculate the corners of each image in sky coordinates *)
-  let corners = List.map (fun (file, wcs, width, height) ->
+  let corners = List.map (fun (file, (wcs:wcs_params_solved), width, height) ->
     let ra_dec_corners = [
       pixel_to_sky wcs 0.0 0.0;  (* bottom-left *)
       pixel_to_sky wcs (float_of_int (width-1)) 0.0;  (* bottom-right *)

@@ -188,6 +188,19 @@ type rotation_data_item = {
   filename: string;
 }
 
+(* WCS parameters from plate solved FITS headers *)
+type wcs_params_solved = {
+  crpix1: float;     (* X reference pixel *)
+  crpix2: float;     (* Y reference pixel *)
+  crval1: float;     (* RA at reference pixel (degrees) *)
+  crval2: float;     (* DEC at reference pixel (degrees) *)
+  cd1_1: float;      (* Transformation matrix element *)
+  cd1_2: float;      (* Transformation matrix element *)
+  cd2_1: float;      (* Transformation matrix element *)
+  cd2_2: float;      (* Transformation matrix element *)
+  equinox: float;    (* Equinox of coordinates *)
+}
+
 (* Live stacking coordinates from FITS keywords *)
 type live_stack_coords = {
   coord_rot: float;
@@ -224,6 +237,35 @@ type comparison_result = {
   runtime_ratio: float;
   has_live_stack: bool;           (* New field indicating presence of live stack data *)
   live_stack_error: float option; (* New field for live stack error if available *)
+}
+
+(* Define a structure for the transformation matrices *)
+type matrix_data = {
+  (* Telescope transformation matrix *)
+  tel_m11: float;
+  tel_m12: float;
+  tel_m13: float; (* tx *)
+  tel_m21: float;
+  tel_m22: float;
+  tel_m23: float; (* ty *)
+  
+  (* Plate-solving CD matrix *)
+  cd1_1: float;
+  cd1_2: float;
+  cd2_1: float;
+  cd2_2: float;
+  
+  (* Reference points for WCS *)
+  crpix1: float;
+  crpix2: float;
+  crval1: float;
+  crval2: float;
+  
+  (* Image dimensions *)
+  width: int;
+  height: int;
+  
+  filename: string;
 }
 
 (* Implementation of List.take function *)

@@ -5,35 +5,6 @@ open Fits
 open Printf
 open Plplot
 
-(* Define a structure for the transformation matrices *)
-type matrix_data = {
-  (* Telescope transformation matrix *)
-  tel_m11: float;
-  tel_m12: float;
-  tel_m13: float; (* tx *)
-  tel_m21: float;
-  tel_m22: float;
-  tel_m23: float; (* ty *)
-  
-  (* Plate-solving CD matrix *)
-  cd1_1: float;
-  cd1_2: float;
-  cd2_1: float;
-  cd2_2: float;
-  
-  (* Reference points for WCS *)
-  crpix1: float;
-  crpix2: float;
-  crval1: float;
-  crval2: float;
-  
-  (* Image dimensions *)
-  width: int;
-  height: int;
-  
-  filename: string;
-}
-
 (* Estimate pixel scale in degrees/pixel *)
 let estimate_pixel_scale m =
   let scale_from_cd = 
