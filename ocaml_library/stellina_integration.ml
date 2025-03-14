@@ -735,8 +735,8 @@ let process_directory src_dir flags =
       let focus_map = motors |> member "MAP" |> to_int in
       let stacking = json |> member "stackingData" |> member "liveRegistrationResult" in
       let roundness = stacking |> member "roundness" |> safe_float in
-      let status = match stacking |> member "statusMessage" |> to_string with
-	| "StackingRoundnessError" -> Roundness
+      let status, matrix_elements = match stacking |> member "statusMessage" |> to_string with
+	| "StackingRoundnessError" -> Roundness, []
 	| "StackingOk" ->
 	  correction_x := stacking |> member "correction" |> member "x" |> safe_float;
 	  correction_y := stacking |> member "correction" |> member "y" |> safe_float;
@@ -748,8 +748,40 @@ let process_directory src_dir flags =
 	    (
 	    focus_flt := stacking |> member "focus" |> safe_float;
 	    focus_qual := stacking |> member "focusQuality" |> safe_float;
-	    );
-          StackingOK
+	    StackingOK, []	      
+	    )
+	  else
+	  (
+	   (* Check if matrix is an array and has 9 elements *)
+	    let mat = stacking |> member "matrix" in
+	      (
+		  (* Store all 9 elements for completeness *)
+		  let m = Array.init 9 (fun ix -> Yojson.Basic.Util.index ix mat |> safe_float) in
+		  let pixel_scale_deg_per_pix = (2.4e-6 /. 400e-3) *. (180.0 /. Float.pi) in  (* Calculate from your telescope specs *)
+		  let pixel_scale = pixel_scale_deg_per_pix *. 3600.0 in  (* 2.47 arcsec/pixel *)
+		  (* Convert 3×3 affine matrix to WCS-compatible scaled 2×2 matrix *)
+		  let cd1_1_scaled = m.(0) *. pixel_scale_deg_per_pix in
+		  let cd1_2_scaled = m.(1) *. pixel_scale_deg_per_pix in
+		  let cd2_1_scaled = m.(3) *. pixel_scale_deg_per_pix in
+		  let cd2_2_scaled = m.(4) *. pixel_scale_deg_per_pix in
+		  StackingOK,
+		  [
+		    ("CD1_1S", Printf.sprintf "%f" cd1_1_scaled, "Scaled telescope matrix element 1,1");
+		    ("CD1_2S", Printf.sprintf "%f" cd1_2_scaled, "Scaled telescope matrix element 1,2");
+		    ("CD2_1S", Printf.sprintf "%f" cd2_1_scaled, "Scaled telescope matrix element 2,1");
+		    ("CD2_2S", Printf.sprintf "%f" cd2_2_scaled, "Scaled telescope matrix element 2,2");
+		    ("CD1_1M", Printf.sprintf "%f" m.(0), "Transformation matrix element 1,1");
+		    ("CD1_2M", Printf.sprintf "%f" m.(1), "Transformation matrix element 1,2");
+		    ("CD1_3M", Printf.sprintf "%f" m.(2), "Transformation matrix element 1,3");
+		    ("CD2_1M", Printf.sprintf "%f" m.(3), "Transformation matrix element 2,1");
+		    ("CD2_2M", Printf.sprintf "%f" m.(4), "Transformation matrix element 2,2");
+		    ("CD2_3M", Printf.sprintf "%f" m.(5), "Transformation matrix element 2,3");
+		    ("CD3_1M", Printf.sprintf "%f" m.(6), "Transformation matrix element 3,1");
+		    ("CD3_2M", Printf.sprintf "%f" m.(7), "Transformation matrix element 3,2");
+		    ("CD3_3M", Printf.sprintf "%f" m.(8), "Transformation matrix element 3,3");
+		  ]
+	      )
+	    )
 	| msg -> failwith msg in
       (* get timestamp *)
       let hdrh = just_header fits_file in
@@ -827,7 +859,7 @@ let process_directory src_dir flags =
 		    ("HAVAL", Printf.sprintf "%f" hour_angle, "Hour angle (hours)");
 		    ("ROTRATE", Printf.sprintf "%f" (rotation_rate *. 180.0 /. Float.pi), "Field rotation rate (deg/hr)");
 		    ("STATUS", Printf.sprintf "%s" (status_msg status), "Stacking status");
-                    ] @ if status = StackingOK then [
+                    ] @ if status = StackingOK then matrix_elements @ [
 		    ("CORX", Printf.sprintf "%f" !correction_x, "Correction X");
 		    ("CORY", Printf.sprintf "%f" !correction_y, "Correction Y");
 		    ("CORROT", Printf.sprintf "%f" !correction_rot, "Correction ROT");

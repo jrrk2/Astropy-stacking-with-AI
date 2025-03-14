@@ -11,6 +11,8 @@ tempdir/
 solved_verification/
 star_detection_results/
 comparison_results/
+detailed_analysis/
+fits_analysis/
 archive.shar.txt
 altaz_errors.csv
 blink.sh

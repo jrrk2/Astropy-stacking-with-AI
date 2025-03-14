@@ -39,6 +39,9 @@ cmpfitsext: _build/default/fits_compare_extension.exe
 live: _build/default/live_stack_cli.exe
 	env OCAMLRUNPARAM=b _build/default/live_stack_cli.exe -ref solved_verification/cal_20250217_204343_BGGR_rgb.fits -i rgb
 
+detail: _build/default/detailed_frame_analysis.exe
+	env OCAMLRUNPARAM=b _build/default/detailed_frame_analysis.exe -f1 solved_verification/cal_20250217_204343_BGGR_rgb.fits -f2 solved_verification/cal_20250217_204354_BGGR_rgb.fits
+
 shar:
 	(cd _build/default && shar `ls -1 *.ml *.mli | fgrep -v .pp.` > ../../archive.shar.txt)
 
@@ -73,4 +76,7 @@ _build/default/fits_compare_cli.exe:
 	dune build $@
 
 _build/default/fits_compare_extension.exe:
+	dune build $@
+
+_build/default/detailed_frame_analysis.exe:
 	dune build $@
