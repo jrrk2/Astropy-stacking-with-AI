@@ -450,7 +450,9 @@ let copy_fits_with_updates source_path target_path updates =
     
     (* Ensure header is multiple of 2880 bytes *)
     let header_size = ((!pos + 2879) / 2880) * 2880 in
-    
+
+    let image = read_image source_path in (* in case the same as output file *)
+
     (* Open output file *)
     let out_fd = open_out_bin target_path in
     
@@ -461,18 +463,7 @@ let copy_fits_with_updates source_path target_path updates =
     let in_fd = open_in_bin source_path in
     let _ = input in_fd (Bytes.create (String.length header)) 0 (String.length header) in  (* Skip original header *)
     
-    let buffer_size = 8192 in
-    let buffer = Bytes.create buffer_size in
-    let rec copy_data () =
-      let n = input in_fd buffer 0 buffer_size in
-      if n > 0 then begin
-        output out_fd buffer 0 n;
-        copy_data ()
-      end
-    in
-    copy_data ();
-    
-    close_in in_fd;
+    output out_fd (Bytes.of_string image) (String.length header) (String.length image - String.length header);
     close_out out_fd;
     
     true

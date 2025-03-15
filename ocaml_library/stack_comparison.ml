@@ -4,8 +4,8 @@ open Types
 open Printf
 open Fits
 open Fits_utils
+open Stack_debug
 open Plate_solve_verification
-open Astrometric_alignment
 
 (* Log levels *)
 type log_level = Debug | Info | Warning | Error

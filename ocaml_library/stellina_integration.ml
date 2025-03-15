@@ -5,6 +5,7 @@ open Types
 open Fits
 open Util
 open Unified_interface
+open Plate_solve_verification
 
 (* Stellina-specific Types *)
 type stellina_flags = {
@@ -47,7 +48,7 @@ let default_process_flags = {
   target_name = None;
   max_separation_deg = 5.0;
   dry_run = false;
-  solve = false;
+  solve = true;
   add_registration = true;
   observation_json_path = None;
   calibrate = false;
@@ -67,6 +68,181 @@ let default_analysis_flags = {
   show_dist_plot = false;
   show_stats = true;
 }
+
+(* Run astrometry.net plate solving on a FITS file *)
+let extract_wcs solved_fits =
+      (* Extract WCS from solved file *)
+      let solved_hdrh = Fits.just_header solved_fits in
+
+      (* Create WCS structure from solved file *)
+      let (wcs:wcs_params_solved) = {
+	crpix1 = parse_float solved_hdrh "CRPIX1";
+	crpix2 = parse_float solved_hdrh "CRPIX2";
+	crval1 = parse_float solved_hdrh "CRVAL1";
+	crval2 = parse_float solved_hdrh "CRVAL2";
+	cd1_1 = parse_float solved_hdrh "CD1_1";
+	cd1_2 = parse_float solved_hdrh "CD1_2";
+	cd2_1 = parse_float solved_hdrh "CD2_1";
+	cd2_2 = parse_float solved_hdrh "CD2_2";
+	equinox = 2000.0; (* Default to J2000 *)
+      } in
+
+      printf "  Solved WCS parameters:\n";
+      printf "    CRVAL1 = %.6f, CRVAL2 = %.6f\n" wcs.crval1 wcs.crval2;
+      printf "    CRPIX1 = %.6f, CRPIX2 = %.6f\n" wcs.crpix1 wcs.crpix2;
+      printf "    CD Matrix = [%.6f %.6f; %.6f %.6f]\n" 
+	wcs.cd1_1 wcs.cd1_2 wcs.cd2_1 wcs.cd2_2;
+
+      (* Copy the WCS from solved file to original file *)
+      wcs, [
+	("CTYPE1", "'RA---TAN'", "Right ascension, tangent projection");
+	("CTYPE2", "'DEC--TAN'", "Declination, tangent projection");
+	("CRVAL1", Printf.sprintf "%f" wcs.crval1, "RA at reference pixel (deg)");
+	("CRVAL2", Printf.sprintf "%f" wcs.crval2, "Dec at reference pixel (deg)");
+	("CRPIX1", Printf.sprintf "%f" wcs.crpix1, "X reference pixel");
+	("CRPIX2", Printf.sprintf "%f" wcs.crpix2, "Y reference pixel");
+	("CD1_1", Printf.sprintf "%e" wcs.cd1_1, "Transformation matrix element");
+	("CD1_2", Printf.sprintf "%e" wcs.cd1_2, "Transformation matrix element");
+	("CD2_1", Printf.sprintf "%e" wcs.cd2_1, "Transformation matrix element");
+	("CD2_2", Printf.sprintf "%e" wcs.cd2_2, "Transformation matrix element");
+	("EQUINOX", "2000.0", "Equinox of coordinates");
+	("WCSSOLVE", "'TRUE'", "WCS solved by astrometry.net");
+      ]
+
+let run_plate_solving mount_ra mount_dec fits_file =
+    print_endline ("  Running astrometry.net solve-field on "^Filename.basename fits_file);
+    (* Create a temporary directory for solve-field output *)
+    let temp_dir = Filename.temp_file "astrometry_" "_dir" in
+    Unix.unlink temp_dir;
+    Unix.mkdir temp_dir 0o755;
+    let rslt = solve_field {default_options with radius=10.0; mount_ra; mount_dec} fits_file temp_dir in
+        
+    (* Output base filename *)
+    let base_name = Filename.concat temp_dir (Filename.remove_extension (Filename.basename fits_file)) in
+
+    (* Read the WCS file *)
+    let wcs_file = base_name ^ ".wcs" in
+    let solved_fits = base_name ^ ".solved" in
+
+    if Sys.file_exists solved_fits then begin
+      let wcs, updates = extract_wcs wcs_file in
+      if Fits.copy_fits_with_updates fits_file fits_file updates then
+        begin
+	print_endline "Successfully copied WCS to original file\n";
+        Some wcs
+        end
+      else
+        begin
+        print_endline ("copy fits failed");
+        None
+        end
+    end
+      else
+        begin
+        print_endline (solved_fits^" not found");
+        None
+        end
+
+(* Propagate WCS from first frame to subsequent frames using live stacking matrices *)
+let propagate_wcs (first_wcs:wcs_params_solved) first_matrix current_matrix width height =
+  try
+    (* Convert matrices to transformation parameters *)
+    let convert_matrix_to_transform matrix =
+      let m11 = matrix.(0) in
+      let m12 = matrix.(1) in
+      let m13 = matrix.(2) in
+      let m21 = matrix.(3) in
+      let m22 = matrix.(4) in
+      let m23 = matrix.(5) in
+      
+      (* Extract scale, rotation, and translation *)
+      let scale_x = sqrt(m11 *. m11 +. m21 *. m21) in
+      let scale_y = sqrt(m12 *. m12 +. m22 *. m22) in
+      let scale = (scale_x +. scale_y) /. 2.0 in
+      
+      let rotation = atan2 m21 m11 in
+      
+      let dx = m13 in
+      let dy = m23 in
+      
+      (scale, rotation, dx, dy)
+    in
+    
+    (* Get transformations for both matrices *)
+    let (first_scale, first_rot, first_dx, first_dy) = convert_matrix_to_transform first_matrix in
+    let (curr_scale, curr_rot, curr_dx, curr_dy) = convert_matrix_to_transform current_matrix in
+    
+    (* Calculate the relative transformation *)
+    let rel_scale = curr_scale /. first_scale in
+    let rel_rot = curr_rot -. first_rot in
+    let rel_dx = curr_dx -. first_dx in
+    let rel_dy = curr_dy -. first_dy in
+    
+    printf "  Relative transformation: scale=%.4f, rot=%.4f°, dx=%.2f, dy=%.2f\n" 
+      rel_scale (rel_rot *. 180.0 /. Float.pi) rel_dx rel_dy;
+    
+    (* Create new CD matrix that combines first_wcs CD matrix with the relative transformation *)
+    let cos_rot = cos rel_rot in
+    let sin_rot = sin rel_rot in
+    
+    (* Apply relative transformation to the first WCS CD matrix *)
+    let new_cd1_1 = rel_scale *. (first_wcs.cd1_1 *. cos_rot -. first_wcs.cd1_2 *. sin_rot) in
+    let new_cd1_2 = rel_scale *. (first_wcs.cd1_1 *. sin_rot +. first_wcs.cd1_2 *. cos_rot) in
+    let new_cd2_1 = rel_scale *. (first_wcs.cd2_1 *. cos_rot -. first_wcs.cd2_2 *. sin_rot) in
+    let new_cd2_2 = rel_scale *. (first_wcs.cd2_1 *. sin_rot +. first_wcs.cd2_2 *. cos_rot) in
+    
+    (* Calculate new reference pixel (CRPIX) *)
+    let new_crpix1 = first_wcs.crpix1 -. rel_dx in
+    let new_crpix2 = first_wcs.crpix2 -. rel_dy in
+    
+    (* Create the new WCS structure *)
+    let new_wcs = {
+      crpix1 = new_crpix1;
+      crpix2 = new_crpix2;
+      crval1 = first_wcs.crval1;
+      crval2 = first_wcs.crval2;
+      cd1_1 = new_cd1_1;
+      cd1_2 = new_cd1_2;
+      cd2_1 = new_cd2_1;
+      cd2_2 = new_cd2_2;
+      equinox = 2000.0;
+    } in
+    
+    printf "  Propagated WCS parameters:\n";
+    printf "    CRVAL1 = %.6f, CRVAL2 = %.6f\n" new_wcs.crval1 new_wcs.crval2;
+    printf "    CRPIX1 = %.6f, CRPIX2 = %.6f\n" new_wcs.crpix1 new_wcs.crpix2;
+    printf "    CD Matrix = [%.6e %.6e; %.6e %.6e]\n" 
+      new_wcs.cd1_1 new_wcs.cd1_2 new_wcs.cd2_1 new_wcs.cd2_2;
+    
+    Some new_wcs
+  with e ->
+    printf "  Error propagating WCS: %s\n" (Printexc.to_string e);
+    None
+
+(* Update a FITS file with WCS parameters *)
+let update_fits_with_wcs fits_file (wcs:wcs_params_solved) =
+  let updates = [
+    ("CTYPE1", "'RA---TAN'", "Right ascension, tangent projection");
+    ("CTYPE2", "'DEC--TAN'", "Declination, tangent projection");
+    ("CRVAL1", Printf.sprintf "%f" wcs.crval1, "RA at reference pixel (deg)");
+    ("CRVAL2", Printf.sprintf "%f" wcs.crval2, "Dec at reference pixel (deg)");
+    ("CRPIX1", Printf.sprintf "%f" wcs.crpix1, "X reference pixel");
+    ("CRPIX2", Printf.sprintf "%f" wcs.crpix2, "Y reference pixel");
+    ("CD1_1", Printf.sprintf "%e" wcs.cd1_1, "Transformation matrix element");
+    ("CD1_2", Printf.sprintf "%e" wcs.cd1_2, "Transformation matrix element");
+    ("CD2_1", Printf.sprintf "%e" wcs.cd2_1, "Transformation matrix element");
+    ("CD2_2", Printf.sprintf "%e" wcs.cd2_2, "Transformation matrix element");
+    ("EQUINOX", "2000.0", "Equinox of coordinates");
+    ("WCSDERIV", "'TRUE'", "WCS derived from first frame");
+  ] in
+  
+  if Fits.copy_fits_with_updates fits_file fits_file updates then begin
+    printf "  Successfully updated file with derived WCS\n";
+    true
+  end else begin
+    printf "  Failed to update file with derived WCS\n";
+    false
+  end
 
 (* Determines new filepath with Bayer pattern handling - from stellina_process.ml *)
 let get_new_filepath fits_path ?(base_dir="lights") ?(calibrated=false) () =
@@ -605,6 +781,9 @@ let process_directory src_dir flags =
   } = flags in
 
   let local_context = create_context latitude longitude in
+  (* Add reference for first solved frame WCS *)
+  let (first_solved_wcs:wcs_params_solved option ref) = ref None in
+  let first_solved_matrix = ref None in
   
   printf "\nScanning directory: %s\n" src_dir;
   
@@ -785,6 +964,22 @@ let process_directory src_dir flags =
 	      )
 	    )
 	| msg -> failwith msg in
+      (* When extracting matrix data, store it if it's the first frame *)
+
+      if status = StackingOK then begin
+	(* After parsing the JSON StackingOk case *)
+	if index = 0 && raw_elem <> [||] then begin
+	  printf "  Storing first frame matrix for reference\n";
+	  first_solved_matrix := Some raw_elem;
+
+	  (* If we're going to plate solve, schedule it for the first frame *)
+	  if flags.solve && !first_solved_wcs = None then begin
+	    printf "  Will plate solve first frame to establish WCS reference\n";
+	    (* We'll add the plate solving code later *)
+	  end
+	end
+      end;
+
       (* get timestamp *)
       let hdrh = just_header fits_file in
       let width = parse_int hdrh "NAXIS1" in
@@ -894,7 +1089,7 @@ let process_directory src_dir flags =
 		    ("HAVAL", Printf.sprintf "%f" hour_angle, "Hour angle (hours)");
 		    ("ROTRATE", Printf.sprintf "%f" (rotation_rate *. 180.0 /. Float.pi), "Field rotation rate (deg/hr)");
 		    ("STATUS", Printf.sprintf "%s" (status_msg status), "Stacking status");
-                    ] @ if status = StackingOK then matrix_elements @ (fake_wcs raw_elem) @ [
+                    ] @ if status = StackingOK then matrix_elements @ [
 (*
                     ("CORX", Printf.sprintf "%9f" !correction_x, "Correction X");
 		    ("CORY", Printf.sprintf "%.9f" !correction_y, "Correction Y");
@@ -908,7 +1103,75 @@ let process_directory src_dir flags =
                   if copy_fits_with_updates fits_file new_path updates then begin
                     printf "  Created and annotated %s\n" new_path;
                     processed := !processed + 1;
-                    
+                    let calpath = ref "" in                  
+                    (* Apply calibration if requested *)
+                    if calibrate && status = StackingOK then begin
+                      (match darks_dir with
+                      | Some dark_dir ->
+                          (* Create calibrated output path *)
+                          let cal_path = get_new_filepath new_path ~base_dir ~calibrated:true () in
+                          (match cal_path with
+                          | Some calibrated_path ->
+                              printf "  Applying dark calibration to %s\n" (Filename.basename new_path);
+                              printf "  Output path: %s\n" calibrated_path;
+                              (* Create directory if needed *)
+                              let cal_dir = Filename.dirname calibrated_path in
+                              if not (Sys.file_exists cal_dir) then
+                                create_dir cal_dir;
+                                
+                              (* Apply the calibration with caching *)
+                              if apply_dark_calibration dark_dir new_path calibrated_path temp_tolerance then begin
+                                calibrated := !calibrated + 1;
+                                calpath := Filename.remove_extension calibrated_path ^ "_rgb.fits";
+                                printf "  Successfully calibrated and debayered image %s\n" !calpath;
+				flush stdout
+                              end
+                          | None ->
+                              printf "  Error determining calibrated output path\n")
+                      | None ->
+                          printf "  Warning: No darks directory specified for calibration\n");
+
+                    let first_frame() =
+                    print_endline "debug solving";
+		    (* If this is the first frame and solve is enabled, run astrometry.net *)
+		    if flags.solve && !first_solved_wcs = None then begin
+		      printf "  Running plate solving on first frame...\n";
+                      flush stdout;
+		      let solved_wcs = run_plate_solving ra dec !calpath in
+		      first_solved_wcs := solved_wcs;
+
+		      (* If plate solving succeeded, update the FITS file with the WCS *)
+		      (match solved_wcs with
+		      | Some wcs ->
+			  printf "  Plate solving successful, added WCS to FITS...\n";
+                          flush stdout
+		      | None ->
+			  printf "  Plate solving failed\n");
+		      end in
+
+                    let prop () =
+		      printf "  Propagating WCS from first frame using live stacking matrix...\n";
+		      flush stdout;
+		      let derived_wcs = propagate_wcs (Option.get !first_solved_wcs) 
+						      (Option.get !first_solved_matrix)
+						      raw_elem width height in
+
+		      (* Update the FITS file with the derived WCS *)
+		      (match derived_wcs with
+		      | Some wcs ->
+                          if update_fits_with_wcs !calpath wcs then
+			    printf "  Matrix-based WCS propagation successful\n";
+                          (* Code to update the FITS with derived WCS *)
+		      | None ->
+			  printf "  Failed to propagate WCS\n") in
+
+		    if proceed && not dry_run && (Sys.file_exists new_path) then
+                      begin
+                      if index = 0 then first_frame ()
+		      (* For subsequent frames, use matrices to propagate WCS *)
+		      else if !first_solved_wcs <> None && !first_solved_matrix <> None && raw_elem <> [||] then prop();
+                      end;
+
                     (* Apply pointing model if available *)
                     if Option.is_some pointing_model then begin
                       let model = Option.get pointing_model in
@@ -941,33 +1204,6 @@ let process_directory src_dir flags =
                             registration_failed := !registration_failed + 1
                           end
                     end;
-                    
-                    (* Apply calibration if requested *)
-                    if calibrate && status = StackingOK then begin
-                      match darks_dir with
-                      | Some dark_dir ->
-                          (* Create calibrated output path *)
-                          let cal_path = get_new_filepath new_path ~base_dir ~calibrated:true () in
-                          (match cal_path with
-                          | Some calibrated_path ->
-                              printf "  Applying dark calibration to %s\n" (Filename.basename new_path);
-                              printf "  Output path: %s\n" calibrated_path;
-                              
-                              (* Create directory if needed *)
-                              let cal_dir = Filename.dirname calibrated_path in
-                              if not (Sys.file_exists cal_dir) then
-                                create_dir cal_dir;
-                                
-                              (* Apply the calibration with caching *)
-                              if apply_dark_calibration dark_dir new_path calibrated_path temp_tolerance then begin
-                                printf "  Successfully calibrated image\n";
-                                calibrated := !calibrated + 1;
-				flush stdout
-                              end
-                          | None ->
-                              printf "  Error determining calibrated output path\n")
-                      | None ->
-                          printf "  Warning: No darks directory specified for calibration\n"
                     end
                   end else begin
                     eprintf "  Failed to copy and annotate FITS file\n";
@@ -991,7 +1227,7 @@ let process_directory src_dir flags =
     | e ->
         eprintf "  Error reading files: %s\n" (Printexc.to_string e);
         errors := !errors + 1
-  ) !pairs;
+  ) (List.rev !pairs);
 
   (* In the process_directory function, after all files are processed *)
   (* Near the end, where you print the summary, add: *)
@@ -1210,7 +1446,7 @@ let main () =
     target_name = !target;
     max_separation_deg = !max_separation;
     dry_run = !dry_run;
-    solve = false;
+    solve = true;
     add_registration = not !no_registration;
     observation_json_path = !observation_json;
     calibrate = !calibrate;

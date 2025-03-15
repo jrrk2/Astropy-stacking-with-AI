@@ -41,12 +41,12 @@
 (executable
   (name stellina_integration)
   (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
-  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface debayer_integration dark_temp_analysis dark_calibration debayer_integration astro_noise_analysis simbad query_simbad stack_debug stellina_integration))
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface debayer_integration dark_temp_analysis dark_calibration debayer_integration astro_noise_analysis simbad query_simbad stack_debug plate_solve_verification stellina_integration))
 
 (executable
  (name stack_comparison_cli)
  (libraries str unix bigarray plplot cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
- (modules fits fits_utils parallel_plate_solve plate_solve_verification astrometric_alignment triangle_alignment rgb_star_alignment stack_comparison stack_comparison_cli))
+ (modules fits fits_utils parallel_plate_solve plate_solve_verification stack_debug astrometric_alignment triangle_alignment rgb_star_alignment stack_comparison stack_comparison_cli))
 
 (executable
  (name rgb_test_card_generator)
