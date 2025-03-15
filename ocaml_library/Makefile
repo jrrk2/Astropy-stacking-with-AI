@@ -21,10 +21,13 @@ stack: _build/default/astrometric_stack_cli.exe
 	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -align plate-solved -o stacked_astro.fits solved_verification/cal_*_rgb.fits
 
 live: _build/default/astrometric_stack_cli.exe
-	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -align live-stack -o stacked_live.fits rgb/cal_*_rgb.fits
+	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -unified-wcs -method average -o stacked_live.fits rgb/cal_*_rgb.fits
 
 test: _build/default/fits_reader_test.exe
 	env OCAMLRUNPARAM=b _build/default/fits_reader_test.exe -f solved_verification/cal_20250217_204959_BGGR_rgb.fits
+
+testcard: _build/default/astrometric_stack_cli.exe
+	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -unified-wcs -method average -align auto -o stacked_test.fits test_cards/rgb_test_card_base.fits test_cards/rgb_test_card_base_translated.fits test_cards/rgb_test_card_base_rotated.fits test_cards/rgb_test_card_base_complex.fits
 
 detect: _build/default/star_detection_cli.exe
 	-@rm -rf star_detection_results
@@ -50,6 +53,9 @@ shar:
 
 model: _build/default/altaz_radec_model.exe
 	env OCAMLRUNPARAM=b _build/default/altaz_radec_model.exe -lat $(LAT) -long $(LONG) -json $(LIGHTDIR) $(LIGHTDIR)/02-images-initial/img-000?r.fits
+
+simbad: _build/default/simbad_main.exe
+	env OCAMLRUNPARAM=b _build/default/simbad_main.exe $(TARGET)
 
 _build/default/stellina_integration.exe:
 	dune build $@
@@ -85,4 +91,7 @@ _build/default/fits_matrix_comparison.exe:
 	dune build $@
 
 _build/default/detailed_frame_analysis.exe:
+	dune build $@
+
+_build/default/simbad_main.exe:
 	dune build $@

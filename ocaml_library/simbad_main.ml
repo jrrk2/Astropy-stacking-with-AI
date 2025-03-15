@@ -1,1 +1,1 @@
-let _ = Query_simbad.query_simbad Sys.argv.(1)
+let _ = Query_simbad.get_object_coordinates Sys.argv.(1)

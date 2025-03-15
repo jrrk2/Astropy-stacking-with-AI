@@ -2,114 +2,12 @@
 open Types
 open Fits
 open Printf
+open Stack_debug
 
 let print_memory_usage label =
   let stat = Gc.stat () in
   print_endline (Printf.sprintf "%s: Heap words: %d, Live words: %d, Free words: %d\n" 
     label stat.heap_words stat.live_words stat.free_words)
-
-(* Extract WCS information from FITS header *)
-let extract_wcs_params header =
-  try
-    let crpix1 = parse_float header "CRPIX1" in
-    let crpix2 = parse_float header "CRPIX2" in
-    let crval1 = parse_float header "CRVAL1" in
-    let crval2 = parse_float header "CRVAL2" in
-    
-    (* CD matrix values - handles both CD and CDELT formats *)
-    let (cd1_1, cd1_2, cd2_1, cd2_2) =
-      try
-        (* Try CD matrix format first *)
-        (parse_float header "CD1_1",
-         parse_float header "CD1_2",
-         parse_float header "CD2_1",
-         parse_float header "CD2_2")
-      with Not_found ->
-        (* Fall back to CDELT format *)
-        let cdelt1 = parse_float header "CDELT1" in
-        let cdelt2 = parse_float header "CDELT2" in
-        let crota = 
-          try parse_float header "CROTA2"
-          with Not_found -> 0.0 
-        in
-        let cos_rot = cos (crota *. Float.pi /. 180.0) in
-        let sin_rot = sin (crota *. Float.pi /. 180.0) in
-        (cdelt1 *. cos_rot, (-. cdelt1) *. sin_rot,
-         cdelt2 *. sin_rot, cdelt2 *. cos_rot)
-    in
-    
-    (* Get equinox or default to 2000.0 *)
-    let equinox = 
-      try parse_float header "EQUINOX"
-      with Not_found -> 
-        try parse_float header "EPOCH"
-        with Not_found -> 2000.0
-    in
-    
-    Some {
-      crpix1; crpix2;
-      crval1; crval2;
-      cd1_1; cd1_2;
-      cd2_1; cd2_2;
-      equinox;
-    }
-  with Not_found ->
-    Printf.printf "Warning: Missing required WCS keys in FITS header\n";
-    flush stdout;
-    None
-
-(* Convert pixel coordinates to sky coordinates (RA/Dec) *)
-let pixel_to_sky (wcs:wcs_params_solved) x y =
-  (* Convert pixel coordinates to 0-based *)
-  let x_pix = x +. 1.0 -. wcs.crpix1 in
-  let y_pix = y +. 1.0 -. wcs.crpix2 in
-  
-  (* Apply CD matrix transformation *)
-  let ra_offset = wcs.cd1_1 *. x_pix +. wcs.cd1_2 *. y_pix in
-  let dec_offset = wcs.cd2_1 *. x_pix +. wcs.cd2_2 *. y_pix in
-  
-  (* Add offsets to reference values *)
-  let ra = wcs.crval1 +. ra_offset in
-  let dec = wcs.crval2 +. dec_offset in
-  
-  (ra, dec)
-
-(* Convert sky coordinates (RA/Dec) to pixel coordinates *)
-let sky_to_pixel (wcs:wcs_params_solved) ra dec =
-  (* Calculate offsets from reference point *)
-  let ra_offset = ra -. wcs.crval1 in
-  let dec_offset = dec -. wcs.crval2 in
-  
-  (* Compute determinant of CD matrix for inverse *)
-  let det = wcs.cd1_1 *. wcs.cd2_2 -. wcs.cd1_2 *. wcs.cd2_1 in
-  
-  if abs_float det < 1e-10 then
-    failwith "Singular CD matrix in WCS parameters";
-  
-  (* Compute inverse of CD matrix *)
-  let cd1_1_inv = wcs.cd2_2 /. det in
-  let cd1_2_inv = -.wcs.cd1_2 /. det in
-  let cd2_1_inv = -.wcs.cd2_1 /. det in
-  let cd2_2_inv = wcs.cd1_1 /. det in
-  
-  (* Apply inverse transformation *)
-  let x_pix = cd1_1_inv *. ra_offset +. cd1_2_inv *. dec_offset in
-  let y_pix = cd2_1_inv *. ra_offset +. cd2_2_inv *. dec_offset in
-  
-  (* Convert to FITS 1-based coordinates *)
-  let x = x_pix +. wcs.crpix1 -. 1.0 in
-  let y = y_pix +. wcs.crpix2 -. 1.0 in
-  
-  (x, y)
-
-(* Create a transformation function from one WCS to another *)
-let create_wcs_transform src_wcs (dst_wcs:wcs_params_solved) =
-  (fun x y ->
-    (* Convert source pixel to sky coordinates *)
-    let ra, dec = pixel_to_sky src_wcs x y in
-    
-    (* Convert sky coordinates to destination pixel coordinates *)
-    sky_to_pixel dst_wcs ra dec)
 
 (* Align image using WCS information *)
 let align_image_wcs src_data src_width src_height src_wcs dst_wcs dst_width dst_height =

@@ -735,8 +735,8 @@ let process_directory src_dir flags =
       let focus_map = motors |> member "MAP" |> to_int in
       let stacking = json |> member "stackingData" |> member "liveRegistrationResult" in
       let roundness = stacking |> member "roundness" |> safe_float in
-      let status, matrix_elements = match stacking |> member "statusMessage" |> to_string with
-	| "StackingRoundnessError" -> Roundness, []
+      let status, matrix_elements, raw_elem = match stacking |> member "statusMessage" |> to_string with
+	| "StackingRoundnessError" -> Roundness, [], [||]
 	| "StackingOk" ->
 	  correction_x := stacking |> member "correction" |> member "x" |> safe_float;
 	  correction_y := stacking |> member "correction" |> member "y" |> safe_float;
@@ -767,7 +767,7 @@ let process_directory src_dir flags =
 	      ("CD3_1M", Printf.sprintf "%.9f" m.(6), "Transformation matrix element 3,1");
 	      ("CD3_2M", Printf.sprintf "%.9f" m.(7), "Transformation matrix element 3,2");
 	      ("CD3_3M", Printf.sprintf "%.9f" m.(8), "Transformation matrix element 3,3");
-	    ] in	  
+	    ],m in	  
 	  if index = 0 then
 	    (
 	    focus_flt := stacking |> member "focus" |> safe_float;
@@ -787,6 +787,8 @@ let process_directory src_dir flags =
 	| msg -> failwith msg in
       (* get timestamp *)
       let hdrh = just_header fits_file in
+      let width = parse_int hdrh "NAXIS1" in
+      let height = parse_int hdrh "NAXIS2" in
       let timestamp = get_timestamp hdrh in
       printf "  ALT/AZ: %.2f°, %.2f°, stamp=%.3f\n" alt az timestamp;
       let context = {local_context with timestamp=Some timestamp} in
@@ -847,7 +849,38 @@ let process_directory src_dir flags =
 		    alt az ra dec;
 		  printf "  Hour angle: %.4f hours, Field rotation rate: %.4f°/hr\n" 
 		    hour_angle (rotation_rate *. 180.0 /. Float.pi);
-		  
+
+                  let fake_wcs = function [|cd1_1m;cd1_2m;cd1_3m;cd2_1m;cd2_2m;cd2_3m;cd3_1m;cd3_2m;cd3_3m|] ->
+                    let wcs = Stack_debug.convert_live_matrix_to_wcs {
+		      tel_m11 = cd1_1m;
+		      tel_m12 = cd1_2m;
+		      tel_m13 = cd1_3m;  (* Use exact translation from matrix *)
+		      tel_m21 = cd2_1m;
+		      tel_m22 = cd2_2m;
+		      tel_m23 = cd2_3m;  (* Use exact translation from matrix *)
+		      cd1_1 = 1.0;  (* Default values for CD matrix - not used in live stacking *)
+		      cd1_2 = 0.0;
+		      cd2_1 = 0.0;
+		      cd2_2 = 1.0;
+		      crpix1 = float_of_int (width/4); (* assuming 2x2 binning *)
+		      crpix2 = float_of_int (height/4);
+		      crval1 = 0.0;
+		      crval2 = 0.0;
+		      width = width;
+		      height = height;
+		      filename = Filename.basename fits_file;
+                      } in [("CTYPE1", "'RA---TAN'", "/ Right ascension, tangent projection");
+			    ("CTYPE2", "'DEC--TAN'", "Declination, tangent projection");
+			    ("CRPIX1", Printf.sprintf "%.6f" wcs.crpix1, "X reference pixel");
+			    ("CRPIX2", Printf.sprintf "%.6f" wcs.crpix2, "Y reference pixel");
+			    ("CRVAL1", Printf.sprintf "%.10f"  wcs.crval1, "RA at reference pixel (deg)");
+			    ("CRVAL2", Printf.sprintf "%.10f"  wcs.crval2, "Dec at reference pixel (deg)");
+			    ("CD1_1", Printf.sprintf "%.10e" wcs.cd1_1, "Transformation matrix element");
+			    ("CD1_2", Printf.sprintf "%.10e" wcs.cd1_2, "Transformation matrix element");
+			    ("CD2_1", Printf.sprintf "%.10e" wcs.cd2_1, "Transformation matrix element");
+			    ("CD2_2", Printf.sprintf "%.10e" wcs.cd2_2, "Transformation matrix element");
+			    ("EQUINOX", Printf.sprintf "%.1f" wcs.equinox, "Equinox of coordinates")]
+                    | _ -> [] in
                   (* Create updates list *)
                   let updates = [
                     ("MOUNTRA", Printf.sprintf "%f" ra, "Mount RA (deg)");
@@ -861,7 +894,7 @@ let process_directory src_dir flags =
 		    ("HAVAL", Printf.sprintf "%f" hour_angle, "Hour angle (hours)");
 		    ("ROTRATE", Printf.sprintf "%f" (rotation_rate *. 180.0 /. Float.pi), "Field rotation rate (deg/hr)");
 		    ("STATUS", Printf.sprintf "%s" (status_msg status), "Stacking status");
-                    ] @ if status = StackingOK then matrix_elements @ [
+                    ] @ if status = StackingOK then matrix_elements @ (fake_wcs raw_elem) @ [
 (*
                     ("CORX", Printf.sprintf "%9f" !correction_x, "Correction X");
 		    ("CORY", Printf.sprintf "%.9f" !correction_y, "Correction Y");
