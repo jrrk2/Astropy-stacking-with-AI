@@ -920,7 +920,6 @@ let () =
   let file_list = ref None in
   let alignment_source_str = ref "auto" in
   let ref_idx = ref 0 in
-  let unified_wcs = ref true in
 
   (* Define command line arguments *)
   let specs = [
@@ -930,7 +929,6 @@ let () =
     ("-kappa", Arg.Set_float kappa_value, "Kappa value for kappa method");
     ("-list", Arg.String (fun f -> file_list := Some f), "File containing list of input files");
     ("-verbose", Arg.Set verbose, "Enable verbose output");
-    ("-unified-wcs", Arg.Set unified_wcs, "Enable unified_wcs");
     ("-align", Arg.Set_string alignment_source_str, "Alignment source (plate-solved, live-stack, auto)");
     ("-ref", Arg.Set_int ref_idx, "Reference frame index (default: 0)");
   ] in
@@ -1007,7 +1005,4 @@ let () =
   flush stdout;
   
   (* Perform stacking with the selected alignment source *)
-  let _ = if !unified_wcs then
-     stack_with_unified_wcs !input_files !ref_idx method_type !output_file
-   else
-     stack_images !input_files !ref_idx method_type !output_file alignment_source in ()
+  if stack_images !input_files !ref_idx method_type !output_file alignment_source then print_endline "DONE!"

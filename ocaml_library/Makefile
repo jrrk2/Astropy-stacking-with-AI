@@ -21,7 +21,7 @@ stack: _build/default/astrometric_stack_cli.exe
 	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -align plate-solved -o stacked_astro.fits solved_verification/cal_*_rgb.fits
 
 live: _build/default/astrometric_stack_cli.exe
-	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -unified-wcs -method average -o stacked_live.fits rgb/cal_*_rgb.fits
+	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -method average -o stacked_live.fits rgb/cal_*_rgb.fits
 
 test: _build/default/fits_reader_test.exe
 	env OCAMLRUNPARAM=b _build/default/fits_reader_test.exe -f solved_verification/cal_20250217_204959_BGGR_rgb.fits
