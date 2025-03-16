@@ -836,13 +836,13 @@ let process_directory src_dir flags =
       eprintf "Error reading directory %s: %s\n" src_dir (Printexc.to_string e);
       []
   in
-  
+
   (* Find matching JSON and FITS files *)
   let json_files = 
     List.filter (fun f -> Filename.check_suffix f ".json") files
     |> List.map (fun f -> Filename.concat src_dir f)
   in
-  
+
   let fits_files = 
     List.filter (fun f -> Filename.check_suffix f ".fits") files
     |> List.map (fun f -> Filename.concat src_dir f)
@@ -871,12 +871,21 @@ let process_directory src_dir flags =
         in
         
         if fits_index = json_index then
-          pairs := (json_file, fits_file, json_index) :: !pairs
+          pairs := (json_file, fits_file) :: !pairs
       ) fits_files
   ) json_files;
-  
+
+  let stacking_ok json_file =
+      let open Yojson.Basic.Util in
+      let json = Yojson.Basic.from_file json_file in
+      let stacking = json |> member "stackingData" |> member "liveRegistrationResult" in
+      "StackingOk" = (stacking |> member "statusMessage" |> to_string) in
+
   printf "Matched %d JSON/FITS pairs\n" (List.length !pairs);
-  
+  let maxfiles = try int_of_string (Sys.getenv "MAXFILES") with _ -> 9999 in
+  let pairs = List.filteri (fun ix (json,fits) -> ix < maxfiles && stacking_ok json) (List.rev !pairs) in
+  printf "Limited to %d JSON/FITS pairs\n" (List.length pairs);
+
   if dry_run then
     printf "\nDRY RUN - no files will be modified\n";
   
@@ -896,26 +905,26 @@ let process_directory src_dir flags =
   let coordinates_y = ref 0.0 in
   let coordinates_rot = ref 0.0 in
   (* Process each pair *)
-  List.iter (fun (json_file, fits_file, index) ->
+  List.iteri (fun index (json_file, fits_file) ->
     printf "\nProcessing index %d:\n" index;
     printf "  JSON: %s\n" json_file;
     printf "  FITS: %s\n" fits_file;
     
-    try
+(*    try *)
       (* Parse JSON data *)
       let open JsonParser in
       let open Yojson.Basic.Util in
       let json = Yojson.Basic.from_file json_file in
       let index = json |> member "index" |> to_int in
       let motors = json |> member "motors" in
-      let alt = motors |> member "ALT" |> to_float in
-      let az = motors |> member "AZ" |> to_float in
-      let derot = motors |> member "DER" |> to_float in
+      let alt = motors |> member "ALT" |> safe_float in
+      let az = motors |> member "AZ" |> safe_float in
+      let derot = motors |> member "DER" |> safe_float in
       let focus_map = motors |> member "MAP" |> to_int in
       let stacking = json |> member "stackingData" |> member "liveRegistrationResult" in
       let roundness = stacking |> member "roundness" |> safe_float in
       let status, matrix_elements, raw_elem = match stacking |> member "statusMessage" |> to_string with
-	| "StackingRoundnessError" -> Roundness, [], [||]
+	| "StackingRoundnessError" -> print_endline "Roundness error"; Roundness, [], [||]
 	| "StackingOk" ->
 	  correction_x := stacking |> member "correction" |> member "x" |> safe_float;
 	  correction_y := stacking |> member "correction" |> member "y" |> safe_float;
@@ -949,8 +958,8 @@ let process_directory src_dir flags =
 	    ],m in	  
 	  if index = 0 then
 	    (
-	    focus_flt := stacking |> member "focus" |> safe_float;
-	    focus_qual := stacking |> member "focusQuality" |> safe_float;
+	    focus_flt := (try stacking |> member "focus" |> safe_float with _ -> 0.0);
+	    focus_qual := (try stacking |> member "focusQuality" |> safe_float with _ -> 0.0);
 	    kw_from_m [| 1.0; 0.0; 0.0; 0.0; 1.0; 0.0; 0.0; 0.0; 1.0 |]
 	    )
 	  else
@@ -1223,11 +1232,13 @@ let process_directory src_dir flags =
             eprintf "  Error determining new path\n";
             errors := !errors + 1
       end
+(*
     with
     | e ->
         eprintf "  Error reading files: %s\n" (Printexc.to_string e);
         errors := !errors + 1
-  ) (List.rev !pairs);
+*)
+  ) pairs;
 
   (* In the process_directory function, after all files are processed *)
   (* Near the end, where you print the summary, add: *)
