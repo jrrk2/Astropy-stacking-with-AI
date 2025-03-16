@@ -1,18 +1,115 @@
 (* astrometric_alignment.ml - Functions for alignment based on plate solving data *)
+open Bigarray
 open Types
 open Fits
 open Printf
 open Stack_debug
+open Fits_utils
 
 let print_memory_usage label =
   let stat = Gc.stat () in
   print_endline (Printf.sprintf "%s: Heap words: %d, Live words: %d, Free words: %d\n" 
     label stat.heap_words stat.live_words stat.free_words)
 
+let bilinear_interpolate (data: (int, 'a, 'b) Array2.t) x y =
+  let width = Array2.dim2 data in
+  let height = Array2.dim1 data in
+  
+  let x_floor = floor x in
+  let y_floor = floor y in
+  let x_int = int_of_float x_floor in
+  let y_int = int_of_float y_floor in
+  
+  let x_frac = x -. x_floor in
+  let y_frac = y -. y_floor in
+  
+  if x_int < 0 || x_int >= width - 1 || y_int < 0 || y_int >= height - 1 then
+    0  (* Out of bounds *)
+  else
+    (* Get the four surrounding pixels *)
+    let p00 = float_of_int (Array2.get data y_int x_int) in
+    let p10 = float_of_int (Array2.get data y_int (x_int + 1)) in
+    let p01 = float_of_int (Array2.get data (y_int + 1) x_int) in
+    let p11 = float_of_int (Array2.get data (y_int + 1) (x_int + 1)) in
+    
+    (* Interpolate *)
+    let value = 
+      p00 *. (1.0 -. x_frac) *. (1.0 -. y_frac) +.
+      p10 *. x_frac *. (1.0 -. y_frac) +.
+      p01 *. (1.0 -. x_frac) *. y_frac +.
+      p11 *. x_frac *. y_frac
+    in
+    
+    int_of_float (Float.round value)
+
+let refine_aligned_data 
+    (reference_data: (int, 'a, 'b) Array2.t) 
+    (aligned_data: (int, 'a, 'b) Array2.t) =
+  
+  (* Get dimensions from the bigarrays directly *)
+  let height = Array2.dim1 aligned_data in
+  let width = Array2.dim2 aligned_data in
+  
+  (* First try star-based alignment *)
+  match Rgb_star_alignment.align_rgb_images_from_data reference_data aligned_data ~debug:true () with
+  | Some (transform, _, _, _) ->
+      (* Apply star-based transform to already aligned data *)
+      let refined_data = Array2.create int c_layout height width in
+      
+      (* Initialize with zeros *)
+      for y = 0 to height - 1 do
+        for x = 0 to width - 1 do
+          Array2.set refined_data y x 0
+        done
+      done;
+      
+      for y = 0 to height - 1 do
+        for x = 0 to width - 1 do
+          (* Apply transform *)
+          let src_x = float_of_int x in
+          let src_y = float_of_int y in
+          
+          (* Apply rotation first *)
+          let cos_rot = cos transform.rotation in
+          let sin_rot = sin transform.rotation in
+          let rot_x = src_x *. cos_rot -. src_y *. sin_rot in
+          let rot_y = src_x *. sin_rot +. src_y *. cos_rot in
+          
+          (* Then apply translation *)
+          let tx = rot_x +. transform.dx in
+          let ty = rot_y +. transform.dy in
+          
+          (* Bilinear interpolation *)
+          let interpolated_value = bilinear_interpolate aligned_data tx ty in
+          Array2.set refined_data y x interpolated_value
+        done
+      done;
+      
+      Printf.printf "  Refined alignment using star matching\n";
+      refined_data
+      
+  | None ->
+      (* Fall back to FFT alignment *)
+      Printf.printf "  Star alignment failed, trying FFT alignment\n";
+      let fft_transform = Fft_alignment.align_with_fft reference_data aligned_data in
+      Fft_alignment.align_image aligned_data fft_transform
+
 (* Align image using WCS information *)
-let align_image_wcs src_data src_width src_height src_wcs dst_wcs dst_width dst_height =
-  (* Create output image buffer *)
-  let dst_data = Array.make_matrix dst_height dst_width 0 in
+let align_image_wcs 
+    (src_data: (int, 'a, 'b) Array2.t) 
+    src_width src_height 
+    src_wcs dst_wcs 
+    dst_width dst_height =
+    
+  (* Create output image buffer as Bigarray *)
+  let dst_data = Array2.create int c_layout dst_height dst_width in
+  
+  (* Initialize with zeros *)
+  for y = 0 to dst_height - 1 do
+    for x = 0 to dst_width - 1 do
+      Array2.set dst_data y x 0
+    done
+  done;
   
   (* Create transformation function *)
   let transform = create_wcs_transform dst_wcs src_wcs in
@@ -37,10 +134,10 @@ let align_image_wcs src_data src_width src_height src_wcs dst_wcs dst_width dst_
         let y_frac = src_y -. src_y_floor in
         
         (* Get the four surrounding pixels *)
-        let p00 = float_of_int src_data.(src_y_int).(src_x_int) in
-        let p10 = float_of_int src_data.(src_y_int).(src_x_int + 1) in
-        let p01 = float_of_int src_data.(src_y_int + 1).(src_x_int) in
-        let p11 = float_of_int src_data.(src_y_int + 1).(src_x_int + 1) in
+        let p00 = float_of_int (Array2.get src_data src_y_int src_x_int) in
+        let p10 = float_of_int (Array2.get src_data src_y_int (src_x_int + 1)) in
+        let p01 = float_of_int (Array2.get src_data (src_y_int + 1) src_x_int) in
+        let p11 = float_of_int (Array2.get src_data (src_y_int + 1) (src_x_int + 1)) in
         
         (* Interpolate *)
         let value = 
@@ -50,7 +147,7 @@ let align_image_wcs src_data src_width src_height src_wcs dst_wcs dst_width dst_
           p11 *. x_frac *. y_frac
         in
         
-        dst_data.(y).(x) <- int_of_float (Float.round value)
+        Array2.set dst_data y x (int_of_float (Float.round value))
       end
     done;
   done;
@@ -434,7 +531,7 @@ let stack_astrometric files reference_idx stacking_method output_path =
     let stacked_b = Array.make_matrix height width [] in
     
     (* Process each image *)
-    List.iter (fun (file, wcs, img_width, img_height) ->
+    List.iteri (fun ix (file, wcs, img_width, img_height) ->
       Printf.printf "Processing %s...\n" (Filename.basename file);
       Printf.printf "Applying astrometric alignment between %s and %s\n"
 	reference_file file;
@@ -452,18 +549,35 @@ let stack_astrometric files reference_idx stacking_method output_path =
         let plane_offset = plane * plane_size in
         
         (* Extract the plane data *)
-        let plane_data = Array.make_matrix img_height img_width 0 in
+        let plane_data = Array2.create int c_layout img_height img_width in
         for y = 0 to img_height - 1 do
           for x = 0 to img_width - 1 do
             let offset = plane_offset + (y * img_width + x) * 2 in
             if offset + 1 < String.length contents then
-              plane_data.(y).(x) <- (int_of_char contents.[offset] lsl 8) lor 
-                                  (int_of_char contents.[offset + 1])
+              Array2.set plane_data y x ((int_of_char contents.[offset] lsl 8) lor 
+                                  (int_of_char contents.[offset + 1]))
           done
         done;
         
         (* Align this plane *)
         let aligned_data = align_image_wcs plane_data img_width img_height wcs output_wcs width height in
+	(* Add the refinement step: *)
+	let reference_data = if ix = reference_idx then aligned_data else begin
+	  (* Find the reference data from previously processed images *)
+	  let ref_file, _, _, _ = List.nth image_params reference_idx in
+          let reference_data = Array2.create int c_layout img_height img_width in
+          let _, ref_fits = read_fits_large ref_file in
+        for y = 0 to img_height - 1 do
+          for x = 0 to img_width - 1 do
+            let offset = plane_offset + (y * img_width + x) * 2 in
+            if offset + 1 < String.length contents then
+              Array2.set reference_data y x (Array2.get ref_fits y x)
+          done
+        done;
+        reference_data
+	end in
+
+	let refined_data = refine_aligned_data reference_data aligned_data in
         
         (* Add to stacked data for this plane *)
         let stacked_plane = match plane with
@@ -474,7 +588,7 @@ let stack_astrometric files reference_idx stacking_method output_path =
         
         for y = 0 to height - 1 do
           for x = 0 to width - 1 do
-            stacked_plane.(y).(x) <- aligned_data.(y).(x) :: stacked_plane.(y).(x)
+            stacked_plane.(y).(x) <- Array2.get refined_data y x :: stacked_plane.(y).(x)
           done
         done;
         
@@ -601,7 +715,7 @@ let stack_astrometric files reference_idx stacking_method output_path =
     
     (* Read the image data *)
     let _, contents = find_header_end file (read_image file) in
-    let data = read_fits_data contents img_width img_height in
+    let _, data = read_fits_large contents in
     
     (* Align to the output WCS frame *)
     let aligned_data = align_image_wcs data img_width img_height wcs output_wcs width height in
@@ -609,7 +723,7 @@ let stack_astrometric files reference_idx stacking_method output_path =
     (* Add to stacked data *)
     for y = 0 to height - 1 do
       for x = 0 to width - 1 do
-        let value = aligned_data.(y).(x) in
+        let value = Array2.get aligned_data y x in
         if value > 0 then
           stacked_data.(y).(x) <- value :: stacked_data.(y).(x)
       done

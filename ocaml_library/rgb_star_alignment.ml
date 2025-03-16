@@ -3,6 +3,7 @@
 open Types
 open Fits
 open Fits_utils
+open Bigarray
 
 (* Debug helper function *)
 let debug_print enabled fmt =
@@ -61,7 +62,7 @@ let extract_rgb_values filename data width height x y =
   (r, g, b)
 
 (* Create a star pattern for matching - uses standard OCaml functions *)
-let create_star_pattern max_neighbors filename data width height star stars =
+let create_star_pattern max_neighbors data width height star stars =
   (* Sort other stars by distance from this star *)
   let others_with_dist = ref [] in
   
@@ -336,12 +337,120 @@ let calculate_alignment_error transform matches =
     !total_error /. float_of_int (List.length matches)
   end
 
+let align_rgb_common ref_data target_data ref_width ref_height target_width target_height ?(debug=false) () =
+  
+    let start_time = Unix.gettimeofday() in
+      
+    (* Detect stars in both images *)
+    debug_print debug "Detecting stars...\n";
+    let threshold = 5.0 in  (* Higher threshold for RGB images *)
+
+    let ref_stats = compute_image_stats_big ref_data in
+    let target_stats = compute_image_stats_big target_data in
+
+    let ref_stars = detect_stars_in_image ref_data ref_stats threshold in
+    let target_stars = detect_stars_in_image target_data target_stats threshold in
+
+    debug_print debug "Detected %d reference stars and %d target stars\n"
+      (List.length ref_stars) (List.length target_stars);
+
+    (* Limit to brightest stars *)
+    let max_stars = 50 in
+
+    (* Sort stars by brightness (flux) *)
+    let ref_stars_sorted = List.sort (fun (s1:rgb_star) (s2:rgb_star) -> compare s2.flux s1.flux) ref_stars in
+    let target_stars_sorted = List.sort (fun (s1:rgb_star) (s2:rgb_star) -> compare s2.flux s1.flux) target_stars in
+
+    (* Take only the first max_stars elements *)
+    let rec take n lst acc =
+      if n <= 0 || lst = [] then List.rev acc
+      else take (n-1) (List.tl lst) (List.hd lst :: acc)
+    in
+
+    let ref_stars_limited = take max_stars ref_stars_sorted [] in
+    let target_stars_limited = take max_stars target_stars_sorted [] in
+
+    debug_print debug "Using %d brightest stars from each image\n" 
+      (min (List.length ref_stars_limited) (List.length target_stars_limited));
+
+    (* Convert standard stars to RGB stars *)
+    let ref_rgb_stars = ref_stars_limited in
+    let target_rgb_stars = target_stars_limited in
+
+    (* Create star patterns *)
+    debug_print debug "Creating star patterns...\n";
+    let pattern_neighbors = 8 in  (* Use 8 nearest neighbors for each star *)
+
+    let ref_patterns = Array.of_list 
+      (List.map (fun s -> create_star_pattern pattern_neighbors ref_data ref_width ref_height s ref_rgb_stars) 
+	       ref_rgb_stars) in
+
+    let target_patterns = Array.of_list
+      (List.map (fun s -> create_star_pattern pattern_neighbors target_data target_width target_height s target_rgb_stars)
+	       target_rgb_stars) in
+
+    debug_print debug "Created %d reference patterns and %d target patterns\n"
+      (Array.length ref_patterns) (Array.length target_patterns);
+
+    (* Match patterns *)
+    debug_print debug "Matching star patterns...\n";
+    let min_match_count = 3 in
+    let min_similarity = 0.5 in
+
+    let matches = match_star_patterns ref_patterns target_patterns min_match_count min_similarity in
+
+    debug_print debug "Found %d initial star matches\n" (List.length matches);
+
+    (* Filter spatially consistent matches *)
+    let max_error = 20.0 in
+    let consistent_matches = filter_consistent_matches matches max_error in
+
+    debug_print debug "After spatial consistency filtering: %d matches\n" 
+      (List.length consistent_matches);
+
+    (* Estimate transform *)
+    debug_print debug "Estimating transformation...\n";
+    let transform = estimate_transform consistent_matches in
+
+    debug_print debug "Estimated transform: dx=%.2f, dy=%.2f, rotation=%.2f degrees\n"
+      transform.dx transform.dy (transform.rotation *. 180.0 /. Float.pi);
+
+    (* Calculate alignment error *)
+    let error = calculate_alignment_error transform consistent_matches in
+
+    let end_time = Unix.gettimeofday() in
+    debug_print debug "Alignment completed in %.2f seconds with average error of %.2f pixels\n"
+      (end_time -. start_time) error;
+
+    (* Prepare result *)
+    let success = List.length consistent_matches >= 3 && error < 10.0 in
+    success, Some (transform, consistent_matches, error, end_time -. start_time)
+
+(* Add this to rgb_star_alignment.ml *)
+let align_rgb_images_from_data ref_data target_data ?(debug=false) () =
+  debug_print debug "Starting RGB image alignment between data arrays\n";
+  
+  let start_time = Unix.gettimeofday() in
+  let ref_width = Array2.dim2 ref_data in
+  let ref_height = Array2.dim1 ref_data in
+  let target_width = Array2.dim2 target_data in
+  let target_height = Array2.dim1 target_data in
+  
+  try
+    (* Detect stars in both images *)
+    let success, rslt = align_rgb_common ref_data target_data ref_width ref_height target_width target_height () in
+    if success then
+      rslt
+    else
+      None
+  with e ->
+    debug_print debug "Error in RGB alignment: %s\n" (Printexc.to_string e);
+    None
+
 (* Main function to align RGB images using star patterns *)
 let align_rgb_images ref_file target_file ?(debug=false) () =
   debug_print debug "Starting RGB image alignment between %s and %s\n"
     (Filename.basename ref_file) (Filename.basename target_file);
-  
-  let start_time = Unix.gettimeofday() in
   
   try
     (* Read FITS files and headers *)
@@ -366,95 +475,12 @@ let align_rgb_images ref_file target_file ?(debug=false) () =
       debug_print debug "Reference image: %dx%d, Target image: %dx%d\n"
         ref_width ref_height target_width target_height;
       
-      (* Detect stars in both images *)
-      debug_print debug "Detecting stars...\n";
-      let threshold = 5.0 in  (* Higher threshold for RGB images *)
-      
       let (ref_hdrh, ref_data) = read_fits_large ref_file in
       let (target_hdrh, target_data) = read_fits_large target_file in
-      
-      let ref_stats = compute_image_stats ref_data in
-      let target_stats = compute_image_stats target_data in
-      
-      let ref_stars = detect_stars_in_image ref_data ref_stats threshold in
-      let target_stars = detect_stars_in_image target_data target_stats threshold in
-      
-      debug_print debug "Detected %d reference stars and %d target stars\n"
-        (List.length ref_stars) (List.length target_stars);
-      
-      (* Limit to brightest stars *)
-      let max_stars = 50 in
-      
-      (* Sort stars by brightness (flux) *)
-      let ref_stars_sorted = List.sort (fun (s1:rgb_star) (s2:rgb_star) -> compare s2.flux s1.flux) ref_stars in
-      let target_stars_sorted = List.sort (fun (s1:rgb_star) (s2:rgb_star) -> compare s2.flux s1.flux) target_stars in
-      
-      (* Take only the first max_stars elements *)
-      let rec take n lst acc =
-        if n <= 0 || lst = [] then List.rev acc
-        else take (n-1) (List.tl lst) (List.hd lst :: acc)
-      in
-      
-      let ref_stars_limited = take max_stars ref_stars_sorted [] in
-      let target_stars_limited = take max_stars target_stars_sorted [] in
-      
-      debug_print debug "Using %d brightest stars from each image\n" 
-        (min (List.length ref_stars_limited) (List.length target_stars_limited));
-      
-      (* Convert standard stars to RGB stars *)
-      let ref_rgb_stars = ref_stars_limited in
-      let target_rgb_stars = target_stars_limited in
-      
-      (* Create star patterns *)
-      debug_print debug "Creating star patterns...\n";
-      let pattern_neighbors = 8 in  (* Use 8 nearest neighbors for each star *)
-      
-      let ref_patterns = Array.of_list 
-        (List.map (fun s -> create_star_pattern pattern_neighbors ref_file ref_data ref_width ref_height s ref_rgb_stars) 
-                 ref_rgb_stars) in
-                 
-      let target_patterns = Array.of_list
-        (List.map (fun s -> create_star_pattern pattern_neighbors target_file target_data target_width target_height s target_rgb_stars)
-                 target_rgb_stars) in
-      
-      debug_print debug "Created %d reference patterns and %d target patterns\n"
-        (Array.length ref_patterns) (Array.length target_patterns);
-      
-      (* Match patterns *)
-      debug_print debug "Matching star patterns...\n";
-      let min_match_count = 3 in
-      let min_similarity = 0.5 in
-      
-      let matches = match_star_patterns ref_patterns target_patterns min_match_count min_similarity in
-      
-      debug_print debug "Found %d initial star matches\n" (List.length matches);
-      
-      (* Filter spatially consistent matches *)
-      let max_error = 20.0 in
-      let consistent_matches = filter_consistent_matches matches max_error in
-      
-      debug_print debug "After spatial consistency filtering: %d matches\n" 
-        (List.length consistent_matches);
-      
-      (* Estimate transform *)
-      debug_print debug "Estimating transformation...\n";
-      let transform = estimate_transform consistent_matches in
-      
-      debug_print debug "Estimated transform: dx=%.2f, dy=%.2f, rotation=%.2f degrees\n"
-        transform.dx transform.dy (transform.rotation *. 180.0 /. Float.pi);
-      
-      (* Calculate alignment error *)
-      let error = calculate_alignment_error transform consistent_matches in
-      
-      let end_time = Unix.gettimeofday() in
-      debug_print debug "Alignment completed in %.2f seconds with average error of %.2f pixels\n"
-        (end_time -. start_time) error;
-      
-      (* Prepare result *)
-      let success = List.length consistent_matches >= 3 && error < 10.0 in
+      let success, rslt = align_rgb_common ref_data target_data ref_width ref_height target_width target_height () in
       
       if success then
-        Some (transform, consistent_matches, error, end_time -. start_time)
+        rslt
       else
         None
     end

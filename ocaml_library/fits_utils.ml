@@ -177,6 +177,7 @@ let read_fits_data_mmap filename hdrh =
 (* Read a FITS file with large data handling *)
 let read_fits_large filename =
   (* Read header first *)
+  if String.length filename > 256 then failwith "MAXPATH < 256";
   let fd = open_in_bin filename in
   let hdrh = Hashtbl.create 257 in
   let header = read_header fd "" in
@@ -196,7 +197,7 @@ let get_pixel data y x =
     0  (* Return 0 for out-of-bounds *)
 
 (* Function to compute statistics on a Bigarray image *)
-let compute_image_stats data =
+let compute_image_stats_big data =
   let height = Array2.dim1 data in
   let width = Array2.dim2 data in
   
@@ -236,6 +237,55 @@ let compute_image_stats data =
   
   let stddev = if !count > 1 then sqrt (!sum_sq_diff /. float_of_int (!count - 1)) else 0.0 in
   
+  {
+    width;
+    height;
+    min_value = !min_val;
+    max_value = !max_val;
+    mean;
+    stddev;
+  }
+
+(* Function to compute statistics on a Bigarray image *)
+let compute_image_stats data =
+  let height = Array.length data in
+  let width = Array.length data.(0) in
+
+  let min_val = ref 65535 in
+  let max_val = ref 0 in
+  let sum = ref 0 in
+  let count = ref 0 in
+  
+  (* Sample the image (process every 10th pixel to speed things up) *)
+  for y = 0 to height - 1 do
+    if y mod 10 = 0 then  (* Sample every 10th row *)
+      for x = 0 to width - 1 do
+        if x mod 10 = 0 then begin  (* Sample every 10th pixel in the row *)
+          let val16 = data.(y).(x) in
+          min_val := min !min_val val16;
+          max_val := max !max_val val16;
+          sum := !sum + val16;
+          incr count;
+        end
+      done
+  done;
+  
+  let mean = if !count > 0 then float_of_int !sum /. float_of_int !count else 0.0 in
+  
+  (* Compute standard deviation *)
+  let sum_sq_diff = ref 0.0 in
+  for y = 0 to height - 1 do
+    if y mod 10 = 0 then  (* Sample every 10th row *)
+      for x = 0 to width - 1 do
+        if x mod 10 = 0 then begin  (* Sample every 10th pixel in the row *)
+          let val16 = float_of_int (data.(y).(x)) in
+          let diff = val16 -. mean in
+          sum_sq_diff := !sum_sq_diff +. (diff *. diff);
+        end
+      done
+  done;
+  
+  let stddev = if !count > 1 then sqrt (!sum_sq_diff /. float_of_int (!count - 1)) else 0.0 in
   {
     width;
     height;
@@ -466,7 +516,7 @@ let detect_stars filename ~threshold =
   let (hdrh, data) = read_fits_large filename in
   
   (* Compute image statistics *)
-  let stats = compute_image_stats data in
+  let stats = compute_image_stats_big data in
   
   Printf.printf "Image: %s (%dx%d)\n" filename stats.width stats.height;
   Printf.printf "  Min: %d, Max: %d, Mean: %.1f, StdDev: %.1f\n" 
