@@ -1,51 +1,51 @@
 (executable
   (name altaz_radec_model)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model))
  
 (executable
   (name unified_cli)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface simbad query_simbad astro_noise_analysis debayer_integration dark_temp_analysis dark_calibration))
  
 (executable
   (name dark_temp_analysis_main)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils astro_noise_analysis dark_temp_analysis dark_calibration debayer_integration dark_temp_analysis_main))
  
 (executable
   (name dark_stack)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils astro_noise_analysis dark_temp_analysis dark_calibration debayer_integration dark_stack))
  
 (executable
   (name plate_solve_cli)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils astro_noise_analysis dark_temp_analysis dark_calibration debayer_integration plate_solve_verification parallel_plate_solve plate_solve_cli))
  
 (executable
   (name integration_examples)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface debayer_integration dark_temp_analysis dark_calibration debayer_integration astro_noise_analysis simbad query_simbad integration_examples))
  
 (executable
   (name stellina_integration)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec altaz_radec_model fits_utils integration_examples model_builder unified_cli unified_interface debayer_integration dark_temp_analysis dark_calibration debayer_integration astro_noise_analysis simbad query_simbad stellina_integration))
  
 (executable
   (name simbad_main)
-  (libraries str unix cohttp lwt cohttp-lwt-unix xml-light types astro_utils memtrace)
+  (libraries str unix cohttp lwt cohttp-lwt-unix xml-light types astro_utils)
   (modules altaz altaz_to_radec simbad query_simbad simbad_main))
 
 (executable
   (name align_check_cli)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis alignment_checker align_check_cli))
 
 (executable
   (name astrometric_stack_cli)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils memtrace)
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
   (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis astrometric_alignment astrometric_stack_cli))
 
 (library

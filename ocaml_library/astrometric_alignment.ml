@@ -123,15 +123,184 @@ let create_wcs_transform src_wcs dst_wcs =
     (* Convert sky coordinates to destination pixel coordinates *)
     sky_to_pixel dst_wcs ra dec)
 
-(* Align image using WCS information *)
+(* Add this function for direct image-to-image alignment *)
+let align_direct ref_data ref_width ref_height src_data src_width src_height src_wcs ref_wcs =
+  let dst_data = Array.make_matrix ref_height ref_width 0 in
+  
+  (* Find 4 reference points for a projective transform *)
+  let ref_points = [
+    (ref_width / 4, ref_height / 4);
+    (3 * ref_width / 4, ref_height / 4);
+    (ref_width / 4, 3 * ref_height / 4);
+    (3 * ref_width / 4, 3 * ref_height / 4)
+  ] in
+  
+  (* Map reference points to source image using WCS *)
+  let src_points = List.map (fun (x, y) ->
+    let (ra, dec) = pixel_to_sky ref_wcs (float_of_int x) (float_of_int y) in
+    let (src_x, src_y) = sky_to_pixel src_wcs ra dec in
+    (src_x, src_y)
+  ) ref_points in
+  
+  (* For debugging, print the mappings *)
+  List.iter2 (fun (rx, ry) (sx, sy) ->
+    Printf.printf "Mapping ref(%d,%d) -> src(%.1f,%.1f)\n" rx ry sx sy
+  ) ref_points src_points;
+  
+  (* Simple bilinear mapping using the four corner points *)
+  let transform x y =
+    (* Calculate normalized coordinates in reference image (0-1) *)
+    let nx = float_of_int x /. float_of_int ref_width in
+    let ny = float_of_int y /. float_of_int ref_height in
+    
+    (* Interpolate between the source points *)
+    let p00 = List.nth src_points 0 in
+    let p10 = List.nth src_points 1 in
+    let p01 = List.nth src_points 2 in
+    let p11 = List.nth src_points 3 in
+    
+    let sx = (1.0 -. nx) *. (1.0 -. ny) *. (fst p00) +.
+             nx *. (1.0 -. ny) *. (fst p10) +.
+             (1.0 -. nx) *. ny *. (fst p01) +.
+             nx *. ny *. (fst p11) in
+    
+    let sy = (1.0 -. nx) *. (1.0 -. ny) *. (snd p00) +.
+             nx *. (1.0 -. ny) *. (snd p10) +.
+             (1.0 -. nx) *. ny *. (snd p01) +.
+             nx *. ny *. (snd p11) in
+    
+    (sx, sy)
+  in
+  
+  (* Fill destination image using the transform *)
+  for y = 0 to ref_height - 1 do
+    for x = 0 to ref_width - 1 do
+      let (src_x, src_y) = transform x y in
+      
+      (* Check bounds and do bilinear interpolation *)
+      if src_x >= 0.0 && src_x < float_of_int src_width -. 1.0 &&
+         src_y >= 0.0 && src_y < float_of_int src_height -. 1.0 then begin
+        
+        let src_x_floor = floor src_x in
+        let src_y_floor = floor src_y in
+        let src_x_int = int_of_float src_x_floor in
+        let src_y_int = int_of_float src_y_floor in
+        
+        let x_frac = src_x -. src_x_floor in
+        let y_frac = src_y -. src_y_floor in
+        
+        (* Bilinear interpolation *)
+        let p00 = float_of_int src_data.(src_y_int).(src_x_int) in
+        let p10 = float_of_int src_data.(src_y_int).(src_x_int + 1) in
+        let p01 = float_of_int src_data.(src_y_int + 1).(src_x_int) in
+        let p11 = float_of_int src_data.(src_y_int + 1).(src_x_int + 1) in
+        
+        let value = 
+          p00 *. (1.0 -. x_frac) *. (1.0 -. y_frac) +.
+          p10 *. x_frac *. (1.0 -. y_frac) +.
+          p01 *. (1.0 -. x_frac) *. y_frac +.
+          p11 *. x_frac *. y_frac
+        in
+        
+        dst_data.(y).(x) <- int_of_float (Float.round value)
+      end
+    done
+  done;
+  
+  dst_data
+
 let align_image_wcs src_data src_width src_height src_wcs dst_wcs dst_width dst_height =
   (* Create output image buffer *)
   let dst_data = Array.make_matrix dst_height dst_width 0 in
   
-  (* Create transformation function *)
-  let transform = create_wcs_transform dst_wcs src_wcs in
+  (* Debug the transformation to understand its characteristics *)
+  Printf.printf "WCS transformation analysis:\n";
+  Printf.printf "  Source: CRPIX=(%.2f, %.2f), CRVAL=(%.6f, %.6f)\n" 
+    src_wcs.crpix1 src_wcs.crpix2 src_wcs.crval1 src_wcs.crval2;
+  Printf.printf "  Destination: CRPIX=(%.2f, %.2f), CRVAL=(%.6f, %.6f)\n" 
+    dst_wcs.crpix1 dst_wcs.crpix2 dst_wcs.crval1 dst_wcs.crval2;
   
-  (* Iterate through each pixel in destination image *)
+(* In align_image_wcs, replace the transform function with this more precise version *)
+let transform x y =
+  (* Convert destination pixel to sky coordinates with high precision *)
+  let x_pix = x +. 1.0 -. dst_wcs.crpix1 in
+  let y_pix = y +. 1.0 -. dst_wcs.crpix2 in
+  
+  (* Apply CD matrix with double precision *)
+  let ra_offset = dst_wcs.cd1_1 *. x_pix +. dst_wcs.cd1_2 *. y_pix in
+  let dec_offset = dst_wcs.cd2_1 *. x_pix +. dst_wcs.cd2_2 *. y_pix in
+  
+  (* Calculate precise RA/Dec for this pixel *)
+  let ra = dst_wcs.crval1 +. ra_offset in
+  let dec = dst_wcs.crval2 +. dec_offset in
+  
+  (* Convert to source pixel coordinates with high precision inverse matrix *)
+  let det = src_wcs.cd1_1 *. src_wcs.cd2_2 -. src_wcs.cd1_2 *. src_wcs.cd2_1 in
+  
+  if abs_float det < 1e-10 then
+    failwith "Singular CD matrix in source WCS parameters";
+  
+  let cd1_1_inv = src_wcs.cd2_2 /. det in
+  let cd1_2_inv = -.src_wcs.cd1_2 /. det in
+  let cd2_1_inv = -.src_wcs.cd2_1 /. det in
+  let cd2_2_inv = src_wcs.cd1_1 /. det in
+  
+  (* Calculate RA/Dec offsets from source reference point *)
+  let ra_offset_src = ra -. src_wcs.crval1 in
+  let dec_offset_src = dec -. src_wcs.crval2 in
+  
+  (* Apply inverse transformation with double precision *)
+  let x_pix_src = cd1_1_inv *. ra_offset_src +. cd1_2_inv *. dec_offset_src in
+  let y_pix_src = cd2_1_inv *. ra_offset_src +. cd2_2_inv *. dec_offset_src in
+  
+  (* Convert to source pixel coordinates (1-based to 0-based) *)
+  let x_src = x_pix_src +. src_wcs.crpix1 -. 1.0 in
+  let y_src = y_pix_src +. src_wcs.crpix2 -. 1.0 in
+  
+  (x_src, y_src)
+in
+  (* Add test points to verify transformation *)
+  let test_points = [(dst_width/2, dst_height/2); (0, 0); (dst_width-1, dst_height-1)] in
+  Printf.printf "Transformation test points:\n";
+  List.iter (fun (x, y) ->
+    let src_x, src_y = transform (float_of_int x) (float_of_int y) in
+    Printf.printf "  Dst (%d, %d) -> Src (%.1f, %.1f)\n" x y src_x src_y;
+    
+    (* Check if this falls within src image *)
+    let in_bounds = 
+      src_x >= 0.0 && src_x < float_of_int src_width &&
+      src_y >= 0.0 && src_y < float_of_int src_height
+    in
+    Printf.printf "    In bounds: %b\n" in_bounds;
+  ) test_points;
+  
+  (* If this is the first image being aligned to itself, add extra debug *)
+  if src_width = dst_width && src_height = dst_height then begin
+    let non_zero_count = ref 0 in
+    
+    (* Process center region of image *)
+    for y = dst_height/4 to 3*dst_height/4 - 1 do
+      for x = dst_width/4 to 3*dst_width/4 - 1 do
+        let src_x, src_y = transform (float_of_int x) (float_of_int y) in
+        
+        if src_x >= 0.0 && src_x < float_of_int src_width -. 1.0 &&
+           src_y >= 0.0 && src_y < float_of_int src_height -. 1.0 then begin
+          
+          let src_x_int = int_of_float src_x in
+          let src_y_int = int_of_float src_y in
+          
+          let value = src_data.(src_y_int).(src_x_int) in
+          if value > 0 then incr non_zero_count;
+          
+          dst_data.(y).(x) <- value;
+        end
+      done
+    done;
+    
+    Printf.printf "Self-alignment test: %d non-zero pixels in center region\n" !non_zero_count;
+  end;
+  
+  (* Align the full image - iterate through each pixel in destination image *)
   for y = 0 to dst_height - 1 do
     for x = 0 to dst_width - 1 do
       (* Calculate source coordinates *)
@@ -166,12 +335,11 @@ let align_image_wcs src_data src_width src_height src_wcs dst_wcs dst_width dst_
         
         dst_data.(y).(x) <- int_of_float (Float.round value)
       end
-    done;
+    done
   done;
   
   dst_data
 
-(* Calculate the bounding box that encompasses all images *)
 let calculate_stack_dimensions files =
   (* Extract WCS and dimensions from all images *)
   let image_params = ref [] in
@@ -185,110 +353,62 @@ let calculate_stack_dimensions files =
           let height = parse_int header "NAXIS2" in
           image_params := (file, wcs, width, height) :: !image_params
       | None -> 
-          Printf.printf "Warning: No WCS information found in %s\n" file;
-          flush stdout
+          Printf.printf "Warning: No WCS information found in %s\n" file
     with e -> 
-      Printf.printf "Error processing %s: %s\n" file (Printexc.to_string e);
-      flush stdout
+      Printf.printf "Error processing %s: %s\n" file (Printexc.to_string e)
   ) files;
   
   if List.length !image_params = 0 then
     failwith "No valid plate-solved images found";
   
-  (* Calculate the corners of each image in sky coordinates *)
-  let corners = List.map (fun (file, wcs, width, height) ->
-    let ra_dec_corners = [
-      pixel_to_sky wcs 0.0 0.0;  (* bottom-left *)
-      pixel_to_sky wcs (float_of_int (width-1)) 0.0;  (* bottom-right *)
-      pixel_to_sky wcs 0.0 (float_of_int (height-1));  (* top-left *)
-      pixel_to_sky wcs (float_of_int (width-1)) (float_of_int (height-1))  (* top-right *)
-    ] in
-    (file, wcs, width, height, ra_dec_corners)
-  ) !image_params in
-
-(* Find the min/max RA and Dec across all corners *)
-  let ra_min = ref 360.0 in
-  let ra_max = ref 0.0 in
-  let dec_min = ref 90.0 in
-  let dec_max = ref (-90.0) in
-  
-(* Simple approach: check for large gaps in RA values *)
-  let all_ras = ref [] in
-  List.iter (fun (_, _, _, _, corners) ->
-    List.iter (fun (ra, _) -> all_ras := ra :: !all_ras) corners
-  ) corners;
-  
-  let sorted_ras = List.sort compare !all_ras in
-  let crosses_boundary = 
-    if List.length sorted_ras > 1 then
-      let first_ra = List.hd sorted_ras in
-      let last_ra = List.hd (List.rev sorted_ras) in
-      (* If the range is large but not close to 360, it might cross the boundary *)
-      (last_ra -. first_ra > 180.0) && (last_ra -. first_ra < 350.0)
-    else false
+  (* Choose the middle image as reference *)
+  let (ref_file, ref_wcs, ref_width, ref_height) = 
+    List.nth !image_params (List.length !image_params / 2)
   in
   
-  Printf.printf "RA range: %.2f to %.2f, crosses_boundary: %b\n" 
-    (List.hd sorted_ras) (List.hd (List.rev sorted_ras)) crosses_boundary;
+  Printf.printf "Reference image: %s (%dx%d)\n" ref_file ref_width ref_height;
   
-  (* Now process all corners *)
-  List.iter (fun (_, _, _, _, corners) ->
-    List.iter (fun (ra, dec) ->
-      (* Handle RA wrap around at 0/360 degrees *)
-      let ra_norm = 
-        if crosses_boundary && ra < 180.0 then
-          ra +. 360.0
-        else
-          ra
-      in
-      
-      ra_min := min !ra_min ra_norm;
-      ra_max := max !ra_max ra_norm;
-      dec_min := min !dec_min dec;
-      dec_max := max !dec_max dec
-    ) corners
-  ) corners;
+  (* Calculate corners of reference image *)
+  let corners = [
+    pixel_to_sky ref_wcs 0.0 0.0;
+    pixel_to_sky ref_wcs (float_of_int (ref_width-1)) 0.0;
+    pixel_to_sky ref_wcs 0.0 (float_of_int (ref_height-1));
+    pixel_to_sky ref_wcs (float_of_int (ref_width-1)) (float_of_int (ref_height-1))
+  ] in
   
-  Printf.printf "Calculated bounds: RA=[%.2f, %.2f], Dec=[%.2f, %.2f]\n" 
-    !ra_min !ra_max !dec_min !dec_max;  
-  (* Normalize RA back to 0-360 range *)
-  let ra_min = if !ra_min >= 360.0 then !ra_min -. 360.0 else !ra_min in
-  let ra_max = if !ra_max >= 360.0 then !ra_max -. 360.0 else !ra_max in
+  (* For each image, calculate its mapping onto the reference image *)
+  List.iter (fun (file, wcs, width, height) ->
+    if file <> ref_file then begin
+      let center_px = (float_of_int width /. 2.0, float_of_int height /. 2.0) in
+      let (ra, dec) = pixel_to_sky wcs (fst center_px) (snd center_px) in
+      let (ref_x, ref_y) = sky_to_pixel ref_wcs ra dec in
+      Printf.printf "  Image %s center maps to ref position (%.1f, %.1f)\n" 
+        (Filename.basename file) ref_x ref_y
+    end
+  ) !image_params;
   
-  (* Select a reference image (middle of the set) *)
-  let (ref_file, ref_wcs, ref_width, ref_height, _) = 
-    List.nth corners (List.length corners / 2) 
-  in
+  (* Use the reference image dimensions and add margins *)
+  let margin = 100 in
+  let width_px = ref_width + 2 * margin in
+  let height_px = ref_height + 2 * margin in
   
-  (* Calculate the plate scale (arcsec per pixel) *)
+  (* Calculate the plate scale from reference image *)
   let scale_x = sqrt (ref_wcs.cd1_1 *. ref_wcs.cd1_1 +. ref_wcs.cd2_1 *. ref_wcs.cd2_1) *. 3600.0 in
   let scale_y = sqrt (ref_wcs.cd1_2 *. ref_wcs.cd1_2 +. ref_wcs.cd2_2 *. ref_wcs.cd2_2) *. 3600.0 in
   let avg_scale = (scale_x +. scale_y) /. 2.0 in
   
   Printf.printf "Average plate scale: %.2f arcsec/pixel\n" avg_scale;
   
-  (* Calculate output image size *)
-  let ra_span = if ra_max > ra_min then ra_max -. ra_min else (ra_max +. 360.0) -. ra_min in
-  let dec_span = !dec_max -. !dec_min in
-  
-  (* Convert to pixels using the average plate scale *)
-  let width_px = int_of_float (Float.ceil (ra_span *. 3600.0 /. avg_scale)) in
-  let height_px = int_of_float (Float.ceil (dec_span *. 3600.0 /. avg_scale)) in
-  
-  Printf.printf "Output dimensions: %d x %d pixels\n" width_px height_px;
-  Printf.printf "RA range: %.6f to %.6f (%.6f°)\n" ra_min ra_max ra_span;
-  Printf.printf "Dec range: %.6f to %.6f (%.6f°)\n" !dec_min !dec_max dec_span;
-  
-  (* Create a new WCS for the output image *)
+  (* Create output WCS based on reference image but shifted to include margins *)
   let output_wcs = {
-    crpix1 = 1.0;  (* Reference pixel at the bottom-left *)
-    crpix2 = 1.0;
-    crval1 = ra_min;
-    crval2 = !dec_min;
-    cd1_1 = avg_scale /. 3600.0;  (* Convert arcsec/px to deg/px *)
-    cd1_2 = 0.0;
-    cd2_1 = 0.0;
-    cd2_2 = avg_scale /. 3600.0;
+    crpix1 = ref_wcs.crpix1 +. float_of_int margin;
+    crpix2 = ref_wcs.crpix2 +. float_of_int margin;
+    crval1 = ref_wcs.crval1;
+    crval2 = ref_wcs.crval2;
+    cd1_1 = ref_wcs.cd1_1;
+    cd1_2 = ref_wcs.cd1_2;
+    cd2_1 = ref_wcs.cd2_1;
+    cd2_2 = ref_wcs.cd2_2;
     equinox = ref_wcs.equinox;
   } in
   
@@ -372,7 +492,10 @@ let stack_astrometric files reference_idx stacking_method output_path =
   
   (* Calculate the output dimensions and WCS parameters *)
   let (output_wcs, width, height, avg_scale, image_params) = calculate_stack_dimensions files in
-  
+  let (ref_file, ref_wcs, ref_width, ref_height) = List.nth image_params (reference_idx) in
+  let _, ref_contents = find_header_end ref_file (read_image ref_file) in
+  let ref_data = read_fits_data ref_contents ref_width ref_height in
+
   (* First check if the input files are RGB (NAXIS=3) *)
   let is_rgb = 
     try
@@ -399,6 +522,7 @@ let stack_astrometric files reference_idx stacking_method output_path =
       
       (* Read the image data (all 3 planes) *)
       let _, contents = Fits.find_header_end file (Fits.read_image file) in
+      let img_data = read_fits_data contents img_width img_height in
       
       (* Calculate plane size and offsets *)
       let plane_size = img_width * img_height * 2 in (* 16-bit = 2 bytes per pixel *)
@@ -419,8 +543,12 @@ let stack_astrometric files reference_idx stacking_method output_path =
         done;
         
         (* Align this plane *)
-        let aligned_data = align_image_wcs plane_data img_width img_height wcs output_wcs width height in
-        
+	let aligned_data = 
+	  if file = ref_file then 
+	    Array.map Array.copy ref_data
+          else
+	      align_direct ref_data ref_width ref_height img_data img_width img_height wcs ref_wcs in
+
         (* Add to stacked data for this plane *)
         let stacked_plane = match plane with
           | 0 -> stacked_r
@@ -428,8 +556,8 @@ let stack_astrometric files reference_idx stacking_method output_path =
           | _ -> stacked_b
         in
         
-        for y = 0 to height - 1 do
-          for x = 0 to width - 1 do
+        for y = 0 to ref_height - 1 do
+          for x = 0 to ref_width - 1 do
             stacked_plane.(y).(x) <- aligned_data.(y).(x) :: stacked_plane.(y).(x)
           done
         done;

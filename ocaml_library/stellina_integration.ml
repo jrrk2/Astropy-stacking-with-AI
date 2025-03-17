@@ -173,10 +173,10 @@ let annotate_fits_from_json context json_path fits_path pointing_model =
     
     (* Create updates list *)
     let updates = [
-      ("MOUNTRA", Printf.sprintf "%f" ra, "Mount RA (deg)");
-      ("MOUNTDEC", Printf.sprintf "%f" dec, "Mount DEC (deg)");
-      ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
-      ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
+      ("MOUNTRA", string_of_float ra, "Mount RA (deg)");
+      ("MOUNTDEC", string_of_float dec, "Mount DEC (deg)");
+      ("ALT", string_of_float alt, "Altitude (deg)");
+      ("AZ", string_of_float az, "Azimuth (deg)");
     ] in
     
     (* Create output filename *)
@@ -213,21 +213,25 @@ let apply_model_correction model fits_path output_path =
     
     (* Create updates list *)
     let updates = [
+
+      (* lat/long for ASTAP *)
+      ("OBSGEO-B", string_of_float model.latitude, "Obeserver latitude (degrees)");
+      ("OBSGEO-L", string_of_float model.longitude, "Obeserver longitude (degrees)");
       (* Original mount position *)
-      ("MOUNTRA", Printf.sprintf "%f" mountra, "Original Mount RA (deg)");
-      ("MOUNTDEC", Printf.sprintf "%f" mountdec, "Original Mount DEC (deg)");
-      ("ORIGALT", Printf.sprintf "%f" orig_alt, "Original Altitude (deg)");
-      ("ORIGAZ", Printf.sprintf "%f" orig_az, "Original Azimuth (deg)");
+      ("MOUNTRA", string_of_float mountra, "Original Mount RA (deg)");
+      ("MOUNTDEC", string_of_float mountdec, "Original Mount DEC (deg)");
+      ("ORIGALT", string_of_float orig_alt, "Original Altitude (deg)");
+      ("ORIGAZ", string_of_float orig_az, "Original Azimuth (deg)");
       
       (* Corrected position *)
-      ("CORRRA", Printf.sprintf "%f" corrected_ra, "Corrected RA (deg)");
-      ("CORRDEC", Printf.sprintf "%f" corrected_dec, "Corrected DEC (deg)");
-      ("CORRALT", Printf.sprintf "%f" corr_alt, "Corrected Altitude (deg)");
-      ("CORRAZ", Printf.sprintf "%f" corr_az, "Corrected Azimuth (deg)");
+      ("CORRRA", string_of_float corrected_ra, "Corrected RA (deg)");
+      ("CORRDEC", string_of_float corrected_dec, "Corrected DEC (deg)");
+      ("CORRALT", string_of_float corr_alt, "Corrected Altitude (deg)");
+      ("CORRAZ", string_of_float corr_az, "Corrected Azimuth (deg)");
       
       (* Correction magnitudes *)
-      ("RADELTA", Printf.sprintf "%f" (corrected_ra -. mountra), "RA correction (deg)");
-      ("DECDELTA", Printf.sprintf "%f" (corrected_dec -. mountdec), "DEC correction (deg)");
+      ("RADELTA", string_of_float (corrected_ra -. mountra), "RA correction (deg)");
+      ("DECDELTA", string_of_float (corrected_dec -. mountdec), "DEC correction (deg)");
     ] in
     
     (* Copy with updates *)
@@ -567,6 +571,12 @@ let process_directory src_dir flags =
   printf "Found %d JSON files\n" (List.length json_files);
   printf "Found %d FITS files\n" (List.length fits_files);
   
+  let stacking_ok json_file = try
+      let open Yojson.Basic.Util in
+      let json = Yojson.Basic.from_file json_file in
+      let stacking = json |> member "stackingData" |> member "liveRegistrationResult" in
+      "StackingOk" = (stacking |> member "statusMessage" |> to_string) with _ -> false in
+  
   (* Find matching pairs *)
   let pairs = ref [] in
   List.iter (fun json_file ->
@@ -586,12 +596,15 @@ let process_directory src_dir flags =
             with _ -> -1
         in
         
-        if fits_index = json_index then
-          pairs := (json_file, fits_file, json_index) :: !pairs
+        if fits_index = json_index && stacking_ok json_file then
+          pairs := (json_file, fits_file) :: !pairs
       ) fits_files
   ) json_files;
-  
+
   printf "Matched %d JSON/FITS pairs\n" (List.length !pairs);
+  let maxfiles = try int_of_string (Sys.getenv "MAXFILES") with _ -> 9999 in
+  let pairs = List.filteri (fun ix _ -> ix < maxfiles) (List.rev !pairs) in
+  printf "Limited to %d JSON/FITS pairs\n" (List.length pairs);
   
   if dry_run then
     printf "\nDRY RUN - no files will be modified\n";
@@ -605,7 +618,7 @@ let process_directory src_dir flags =
   let registration_failed = ref 0 in
   
   (* Process each pair *)
-  List.iter (fun (json_file, fits_file, index) ->
+  List.iteri (fun index (json_file, fits_file) ->
     printf "\nProcessing index %d:\n" index;
     printf "  JSON: %s\n" json_file;
     printf "  FITS: %s\n" fits_file;
@@ -664,10 +677,10 @@ let process_directory src_dir flags =
                 if not (Sys.file_exists new_path) then begin
                   (* Create updates list *)
                   let updates = [
-                    ("MOUNTRA", Printf.sprintf "%f" ra, "Mount RA (deg)");
-                    ("MOUNTDEC", Printf.sprintf "%f" dec, "Mount DEC (deg)");
-                    ("ALT", Printf.sprintf "%f" alt, "Altitude (deg)");
-                    ("AZ", Printf.sprintf "%f" az, "Azimuth (deg)");
+                    ("MOUNTRA", string_of_float ra, "Mount RA (deg)");
+                    ("MOUNTDEC", string_of_float dec, "Mount DEC (deg)");
+                    ("ALT", string_of_float alt, "Altitude (deg)");
+                    ("AZ", string_of_float az, "Azimuth (deg)");
                   ] in
 
                   if copy_fits_with_updates fits_file new_path updates then begin
@@ -756,7 +769,7 @@ let process_directory src_dir flags =
     | e ->
         eprintf "  Error reading files: %s\n" (Printexc.to_string e);
         errors := !errors + 1
-  ) !pairs;
+  ) pairs;
   
   (* Print master dark cache statistics *)
   let cache_size = Hashtbl.length master_dark_cache in
