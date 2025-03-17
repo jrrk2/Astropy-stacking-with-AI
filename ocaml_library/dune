@@ -45,8 +45,8 @@
 
 (executable
   (name astrometric_stack_cli)
-  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils)
-  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis astrometric_alignment astrometric_stack_cli))
+  (libraries str unix plplot yojson ppx_deriving_yojson.runtime types astro_utils stb_image stb_image_write)
+  (modules fits util quaternion pointingModel jsonParser altaz altaz_to_radec fits_utils astro_noise_analysis astrometric_alignment image_stretching astrometric_stack_cli))
 
 (library
   (name types)

@@ -5,6 +5,7 @@ open Types
 open Fits
 open Util
 open Unified_interface
+open Fits_utils
 
 (* Stellina-specific Types *)
 type stellina_flags = {
@@ -59,66 +60,6 @@ let default_analysis_flags = {
   show_dist_plot = false;
   show_stats = true;
 }
-
-(* Determines new filepath with Bayer pattern handling - from stellina_process.ml *)
-let get_new_filepath fits_path ?(base_dir="lights") ?(calibrated=false) () =
-  try
-    let hdrh = just_header fits_path in
-    
-    (* Extract temperature *)
-    let temp = get_temperature hdrh in
-    
-    (* Check if filename indicates Bayer pattern *)
-    let fits_filename = Filename.basename fits_path in
-    let bayer_pattern = 
-      if String.contains fits_filename 'r' then "RGGB"
-      else if String.contains fits_filename 'b' then "BGGR"
-      else ""
-    in
-
-    let clean_bayer s = match String.split_on_char '\'' s with
-      | _::nxt::_ -> String.trim nxt
-      | oth -> s in
-
-    (* Also check for BAYERPAT keyword in header if available *)
-    let bayer_pattern = 
-      match Hashtbl.find_opt hdrh "BAYERPAT=" with
-      | Some pat -> clean_bayer (parse_string_header hdrh "BAYERPAT=")
-      | None -> bayer_pattern
-    in
-    
-    (* Create directory name based on temperature *)
-    let temp_k = int_of_float (Float.round (temp +. 273.15)) in
-    let temp_dir = sprintf "temp_%d" temp_k in
-
-    (* Extract date from FITS *)
-    let (year, month, day, hour, minute, second) = 
-      match extract_date_from_fits hdrh with
-      | Some date_components -> date_components
-      | None -> 
-	  (* Default to current date/time if extraction fails *)
-	  let tm = Unix.localtime (Unix.time()) in
-	  (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, 
-	   tm.tm_hour, tm.tm_min, tm.tm_sec)
-    in
-    
-    (* Add Bayer pattern and calibration status to filename *)
-    let prefix = if calibrated then "cal_" else "light_" in
-    let filename = 
-      if bayer_pattern <> "" then
-        sprintf "%s%04d%02d%02d_%02d%02d%02d_%s.fits" 
-          prefix year month day hour minute second bayer_pattern
-      else
-        sprintf "%s%04d%02d%02d_%02d%02d%02d.fits" 
-          prefix year month day hour minute second
-    in
-    
-    let new_path = Filename.concat (Filename.concat base_dir temp_dir) filename in
-    Some new_path
-  with
-  | e -> 
-      eprintf "Error determining new path: %s\n" (Printexc.to_string e);
-      None
 
 (* Verify coordinates are close to target object - from stellina_process.ml *)
 let verify_coordinates context calc_ra calc_dec target_name ?(max_separation_deg=1.0) () =

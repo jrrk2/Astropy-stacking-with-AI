@@ -4,6 +4,9 @@ LAT=52.244020
 LONG=0.078841
 TARGET=M42
 MAXFILES=10
+FIT=true
+MARGINX=-300
+MARGINY=200
 
 all: integrate verify stack
 
@@ -18,7 +21,7 @@ verify: _build/default/plate_solve_cli.exe
 	env OCAMLRUNPARAM=b _build/default/plate_solve_cli.exe -workers 8 -i rgb
 
 stack: _build/default/astrometric_stack_cli.exe
-	env OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -o stacked.fits solved_verification/cal_*_rgb.fits
+	env FIT=$(FIT) MARGINX=$(MARGINX) MARGINY=$(MARGINY) OCAMLRUNPARAM=b _build/default/astrometric_stack_cli.exe -o stacked.fits solved_verification/cal_*_rgb.fits
 
 shar:
 	(cd _build/default && shar `ls -1 *.ml *.mli | fgrep -v .pp.` > ../../archive.shar.txt)

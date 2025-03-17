@@ -124,9 +124,7 @@ let create_wcs_transform src_wcs dst_wcs =
     sky_to_pixel dst_wcs ra dec)
 
 (* Add this function for direct image-to-image alignment *)
-let align_direct ref_data ref_width ref_height src_data src_width src_height src_wcs ref_wcs =
-  let dst_data = Array.make_matrix ref_height ref_width 0 in
-  
+let align_direct ref_width ref_height src_width src_height src_wcs ref_wcs =
   (* Find 4 reference points for a projective transform *)
   let ref_points = [
     (ref_width / 4, ref_height / 4);
@@ -173,9 +171,21 @@ let align_direct ref_data ref_width ref_height src_data src_width src_height src
   in
   
   (* Fill destination image using the transform *)
+  let trans = Array.make_matrix ref_height ref_width (0.0,0.0) in
   for y = 0 to ref_height - 1 do
     for x = 0 to ref_width - 1 do
-      let (src_x, src_y) = transform x y in
+      trans.(y).(x) <- transform x y
+    done
+  done;
+  trans
+
+let fill_direct ref_width ref_height src_data src_width src_height src_wcs ref_wcs trans =
+  let dst_data = Array.make_matrix ref_height ref_width 0 in
+  
+  (* Fill destination image using the transform *)
+  for y = 0 to ref_height - 1 do
+    for x = 0 to ref_width - 1 do
+      let (src_x, src_y) = trans.(y).(x) in
       
       (* Check bounds and do bilinear interpolation *)
       if src_x >= 0.0 && src_x < float_of_int src_width -. 1.0 &&
@@ -209,136 +219,6 @@ let align_direct ref_data ref_width ref_height src_data src_width src_height src
   
   dst_data
 
-let align_image_wcs src_data src_width src_height src_wcs dst_wcs dst_width dst_height =
-  (* Create output image buffer *)
-  let dst_data = Array.make_matrix dst_height dst_width 0 in
-  
-  (* Debug the transformation to understand its characteristics *)
-  Printf.printf "WCS transformation analysis:\n";
-  Printf.printf "  Source: CRPIX=(%.2f, %.2f), CRVAL=(%.6f, %.6f)\n" 
-    src_wcs.crpix1 src_wcs.crpix2 src_wcs.crval1 src_wcs.crval2;
-  Printf.printf "  Destination: CRPIX=(%.2f, %.2f), CRVAL=(%.6f, %.6f)\n" 
-    dst_wcs.crpix1 dst_wcs.crpix2 dst_wcs.crval1 dst_wcs.crval2;
-  
-(* In align_image_wcs, replace the transform function with this more precise version *)
-let transform x y =
-  (* Convert destination pixel to sky coordinates with high precision *)
-  let x_pix = x +. 1.0 -. dst_wcs.crpix1 in
-  let y_pix = y +. 1.0 -. dst_wcs.crpix2 in
-  
-  (* Apply CD matrix with double precision *)
-  let ra_offset = dst_wcs.cd1_1 *. x_pix +. dst_wcs.cd1_2 *. y_pix in
-  let dec_offset = dst_wcs.cd2_1 *. x_pix +. dst_wcs.cd2_2 *. y_pix in
-  
-  (* Calculate precise RA/Dec for this pixel *)
-  let ra = dst_wcs.crval1 +. ra_offset in
-  let dec = dst_wcs.crval2 +. dec_offset in
-  
-  (* Convert to source pixel coordinates with high precision inverse matrix *)
-  let det = src_wcs.cd1_1 *. src_wcs.cd2_2 -. src_wcs.cd1_2 *. src_wcs.cd2_1 in
-  
-  if abs_float det < 1e-10 then
-    failwith "Singular CD matrix in source WCS parameters";
-  
-  let cd1_1_inv = src_wcs.cd2_2 /. det in
-  let cd1_2_inv = -.src_wcs.cd1_2 /. det in
-  let cd2_1_inv = -.src_wcs.cd2_1 /. det in
-  let cd2_2_inv = src_wcs.cd1_1 /. det in
-  
-  (* Calculate RA/Dec offsets from source reference point *)
-  let ra_offset_src = ra -. src_wcs.crval1 in
-  let dec_offset_src = dec -. src_wcs.crval2 in
-  
-  (* Apply inverse transformation with double precision *)
-  let x_pix_src = cd1_1_inv *. ra_offset_src +. cd1_2_inv *. dec_offset_src in
-  let y_pix_src = cd2_1_inv *. ra_offset_src +. cd2_2_inv *. dec_offset_src in
-  
-  (* Convert to source pixel coordinates (1-based to 0-based) *)
-  let x_src = x_pix_src +. src_wcs.crpix1 -. 1.0 in
-  let y_src = y_pix_src +. src_wcs.crpix2 -. 1.0 in
-  
-  (x_src, y_src)
-in
-  (* Add test points to verify transformation *)
-  let test_points = [(dst_width/2, dst_height/2); (0, 0); (dst_width-1, dst_height-1)] in
-  Printf.printf "Transformation test points:\n";
-  List.iter (fun (x, y) ->
-    let src_x, src_y = transform (float_of_int x) (float_of_int y) in
-    Printf.printf "  Dst (%d, %d) -> Src (%.1f, %.1f)\n" x y src_x src_y;
-    
-    (* Check if this falls within src image *)
-    let in_bounds = 
-      src_x >= 0.0 && src_x < float_of_int src_width &&
-      src_y >= 0.0 && src_y < float_of_int src_height
-    in
-    Printf.printf "    In bounds: %b\n" in_bounds;
-  ) test_points;
-  
-  (* If this is the first image being aligned to itself, add extra debug *)
-  if src_width = dst_width && src_height = dst_height then begin
-    let non_zero_count = ref 0 in
-    
-    (* Process center region of image *)
-    for y = dst_height/4 to 3*dst_height/4 - 1 do
-      for x = dst_width/4 to 3*dst_width/4 - 1 do
-        let src_x, src_y = transform (float_of_int x) (float_of_int y) in
-        
-        if src_x >= 0.0 && src_x < float_of_int src_width -. 1.0 &&
-           src_y >= 0.0 && src_y < float_of_int src_height -. 1.0 then begin
-          
-          let src_x_int = int_of_float src_x in
-          let src_y_int = int_of_float src_y in
-          
-          let value = src_data.(src_y_int).(src_x_int) in
-          if value > 0 then incr non_zero_count;
-          
-          dst_data.(y).(x) <- value;
-        end
-      done
-    done;
-    
-    Printf.printf "Self-alignment test: %d non-zero pixels in center region\n" !non_zero_count;
-  end;
-  
-  (* Align the full image - iterate through each pixel in destination image *)
-  for y = 0 to dst_height - 1 do
-    for x = 0 to dst_width - 1 do
-      (* Calculate source coordinates *)
-      let src_x, src_y = transform (float_of_int x) (float_of_int y) in
-      
-      (* Check if source coordinates are within bounds *)
-      if src_x >= 0.0 && src_x < float_of_int src_width -. 1.0 &&
-         src_y >= 0.0 && src_y < float_of_int src_height -. 1.0 then begin
-        
-        (* Bilinear interpolation *)
-        let src_x_floor = floor src_x in
-        let src_y_floor = floor src_y in
-        let src_x_int = int_of_float src_x_floor in
-        let src_y_int = int_of_float src_y_floor in
-        
-        let x_frac = src_x -. src_x_floor in
-        let y_frac = src_y -. src_y_floor in
-        
-        (* Get the four surrounding pixels *)
-        let p00 = float_of_int src_data.(src_y_int).(src_x_int) in
-        let p10 = float_of_int src_data.(src_y_int).(src_x_int + 1) in
-        let p01 = float_of_int src_data.(src_y_int + 1).(src_x_int) in
-        let p11 = float_of_int src_data.(src_y_int + 1).(src_x_int + 1) in
-        
-        (* Interpolate *)
-        let value = 
-          p00 *. (1.0 -. x_frac) *. (1.0 -. y_frac) +.
-          p10 *. x_frac *. (1.0 -. y_frac) +.
-          p01 *. (1.0 -. x_frac) *. y_frac +.
-          p11 *. x_frac *. y_frac
-        in
-        
-        dst_data.(y).(x) <- int_of_float (Float.round value)
-      end
-    done
-  done;
-  
-  dst_data
 (* In calculate_stack_dimensions, implement a better sizing approach *)
 let calculate_stack_dimensions files =
   (* Extract WCS and dimensions from all images *)
@@ -505,7 +385,7 @@ let apply_stacking_method values stacking_method =
               let sum = Array.fold_left (+) 0 values in
               sum / Array.length values
         in        
-        stacked_value
+        (max 0 (min stacked_value 32767))
     else
         0
 
@@ -539,10 +419,42 @@ let stack_astrometric files reference_idx stacking_method output_path =
     let stacked_g = Array.make_matrix height width [] in
     let stacked_b = Array.make_matrix height width [] in
 
-    (* Process each image *)
-    List.iter (fun (file, wcs, img_width, img_height) ->
+    (* Pre-process each image *)
+    let minx = ref 0.0 and miny = ref 0.0 and maxx = ref 0.0 and maxy = ref 0.0 in
+    let transforms = List.map (fun (file, wcs, img_width, img_height) ->
       Printf.printf "Processing %s...\n" (Filename.basename file);
       flush stdout;
+
+      (* Calculate transform bounds *)
+      let trans = align_direct ref_width ref_height img_width img_height wcs ref_wcs in
+      for y = 0 to ref_height - 1 do
+	for x = 0 to ref_width - 1 do
+	  let (src_x, src_y) = trans.(y).(x) in
+          if !minx > src_x then minx := src_x;
+          if !miny > src_y then miny := src_y;
+          if !maxx < src_x then maxx := src_x;
+          if !maxy < src_x then maxy := src_y;
+	done
+      done;
+      trans
+    ) image_params in
+
+    (* Process each image *)
+    List.iter2 (fun (file, wcs, img_width, img_height) trans ->
+      Printf.printf "Processing %s...\n" (Filename.basename file);
+      flush stdout;
+      let fit = try bool_of_string (Sys.getenv "FIT") with _ -> false in
+      let scale = try bool_of_string (Sys.getenv "SCALE") with _ -> false in
+      let marginx = try float_of_string (Sys.getenv "MARGINX") with _ -> 50.0 in
+      let marginy = try float_of_string (Sys.getenv "MARGINY") with _ -> 50.0 in
+
+      if fit then for y = 0 to ref_height - 1 do
+	for x = 0 to ref_width - 1 do
+	  let (src_x, src_y) = trans.(y).(x) in
+	  trans.(y).(x) <- ((src_x +. marginx -. !minx) *. (if scale then float_of_int ref_width /. (!maxx -. !minx) else 1.0),
+                            (src_y +. marginy -. !miny) *. (if scale then float_of_int ref_height /. (!maxy -. !miny) else 1.0));
+	done
+      done;
 
       (* Read the image data (all 3 planes) *)
       let _, contents = Fits.find_header_end file (Fits.read_image file) in
@@ -550,7 +462,6 @@ let stack_astrometric files reference_idx stacking_method output_path =
       (* Calculate plane size and offsets *)
       let plane_size = img_width * img_height * 2 in (* 16-bit = 2 bytes per pixel *)
 
-      (* Extract and align each color plane *)
       for plane = 0 to 2 do
 	let plane_offset = plane * plane_size in
 
@@ -568,9 +479,11 @@ let stack_astrometric files reference_idx stacking_method output_path =
 	(* Align this plane *)
 	let aligned_data = 
 	  if file = ref_file then 
-	    Array.map Array.copy plane_data
+	    plane_data
 	  else
-	    align_direct ref_data ref_width ref_height plane_data img_width img_height wcs ref_wcs in
+            begin
+            fill_direct ref_width ref_height plane_data img_width img_height wcs ref_wcs trans
+            end in
 
 	(* Add to stacked data for this plane *)
 	let stacked_plane = match plane with
@@ -588,7 +501,7 @@ let stack_astrometric files reference_idx stacking_method output_path =
 
 	Printf.printf "  Added %s plane %d to stack\n" (Filename.basename file) plane;
       done;
-    ) image_params;
+    ) image_params transforms;
 
     (* Apply stacking method to each pixel in each plane *)
     let output_r = Array.make_matrix height width 0 in
@@ -690,120 +603,10 @@ let stack_astrometric files reference_idx stacking_method output_path =
     close_out oc;
 
     Printf.printf "Stacked RGB image saved to %s\n" output_path;
-    true
+    Image_stretching.stretch_rgb_fits_file output_path "stretched.fits" Image_stretching.CustomStretch
   end
   else begin
-  
-  (* Create an array to accumulate pixel values and weights *)
-  let stacked_data = Array.make_matrix height width [] in
-  
-  (* Process each image *)
-  List.iter (fun (file, wcs, img_width, img_height) ->
-    Printf.printf "Processing %s...\n" (Filename.basename file);
-    flush stdout;
-    
-    (* Read the image data *)
-    let _, contents = find_header_end file (read_image file) in
-    let data = read_fits_data contents img_width img_height in
-    
-    (* Align to the output WCS frame *)
-    let aligned_data = align_image_wcs data img_width img_height wcs output_wcs width height in
-    
-    (* Add to stacked data *)
-    for y = 0 to height - 1 do
-      for x = 0 to width - 1 do
-        let value = aligned_data.(y).(x) in
-        if value > 0 then
-          stacked_data.(y).(x) <- value :: stacked_data.(y).(x)
-      done
-    done;
-    
-    Printf.printf "  Added %s to stack\n" (Filename.basename file);
-    flush stdout
-  ) image_params;
-  
-  (* Apply stacking method to each pixel *)
-  let output_data = Array.make_matrix height width 0 in
-
-  for y = 0 to height - 1 do
-    for x = 0 to width - 1 do
-      let values = Array.of_list (stacked_data.(y).(x)) in
-      let stacked_value = apply_stacking_method values stacking_method in             
-      output_data.(y).(x) <- stacked_value
-    done;
-    
-    (* Print progress for large images *)
-    if height > 1000 && y mod 100 = 0 then begin
-      Printf.printf "  Stacking progress: %.1f%%\n" (float_of_int y *. 100.0 /. float_of_int height);
-      flush stdout
-    end
-  done;
-  
-  (* Create FITS header for output file *)
-  let header = Hashtbl.create 50 in
-  
-  (* Standard FITS keywords *)
-  Hashtbl.add header "SIMPLE" " = T / FITS standard";
-  Hashtbl.add header "BITPIX" " = 16 / 16-bit signed integers";
-  Hashtbl.add header "NAXIS" " = 2 / Number of axes";
-  Hashtbl.add header "NAXIS1" (Printf.sprintf " = %d / Width in pixels" width);
-  Hashtbl.add header "NAXIS2" (Printf.sprintf " = %d / Height in pixels" height);
-  Hashtbl.add header "EXTEND" " = T / Extensions may be present";
-  
-  (* WCS keywords *)
-  Hashtbl.add header "CTYPE1" " = 'RA---TAN' / Right ascension, tangent projection";
-  Hashtbl.add header "CTYPE2" " = 'DEC--TAN' / Declination, tangent projection";
-  Hashtbl.add header "CRPIX1" (Printf.sprintf " = %.6f / X reference pixel" output_wcs.crpix1);
-  Hashtbl.add header "CRPIX2" (Printf.sprintf " = %.6f / Y reference pixel" output_wcs.crpix2);
-  Hashtbl.add header "CRVAL1" (Printf.sprintf " = %.10f / RA at reference pixel (deg)" output_wcs.crval1);
-  Hashtbl.add header "CRVAL2" (Printf.sprintf " = %.10f / Dec at reference pixel (deg)" output_wcs.crval2);
-  Hashtbl.add header "CD1_1" (Printf.sprintf " = %.10e / Transformation matrix element" output_wcs.cd1_1);
-  Hashtbl.add header "CD1_2" (Printf.sprintf " = %.10e / Transformation matrix element" output_wcs.cd1_2);
-  Hashtbl.add header "CD2_1" (Printf.sprintf " = %.10e / Transformation matrix element" output_wcs.cd2_1);
-  Hashtbl.add header "CD2_2" (Printf.sprintf " = %.10e / Transformation matrix element" output_wcs.cd2_2);
-  Hashtbl.add header "EQUINOX" (Printf.sprintf " = %.1f / Equinox of coordinates" output_wcs.equinox);
-  
-  (* Add metadata about stacking *)
-  Hashtbl.add header "HISTORY" " Stacked with OCaml Astrometric Alignment";
-  Hashtbl.add header "HISTORY" (Printf.sprintf " Stacking method: %s" 
-    (match stacking_method with
-     | Average -> "Average"
-     | Median -> "Median"
-     | SigmaClip sigma -> Printf.sprintf "SigmaClip (%.1f)" sigma
-     | Kappa k -> Printf.sprintf "Kappa (%.1f)" k
-     | WeightedAverage -> "WeightedAverage"));
-  Hashtbl.add header "HISTORY" (Printf.sprintf " Number of frames: %d" (List.length image_params));
-  Hashtbl.add header "HIERARCH ASTRO SCALE" (Printf.sprintf " = %.6f / Plate scale (arcsec/pixel)" avg_scale);
-  
-  (* List input files *)
-  List.iteri (fun i (file, _, _, _) ->
-    Hashtbl.add header (Printf.sprintf "FRAME%03d" (i+1)) (Printf.sprintf " = '%s'" (Filename.basename file))
-  ) image_params;
-  
-  (* Write the stacked image *)
-  let oc = open_out_bin output_path in
-  
-  (* Write header *)
-  ignore (write_fits_header oc header);
-  
-  (* Write data *)
-  for y = 0 to height - 1 do
-    for x = 0 to width - 1 do
-      (* FITS uses big-endian *)
-      let value = output_data.(y).(x) in
-      output_byte oc (value lsr 8);
-      output_byte oc (value land 0xFF);
-    done
-  done;
-  
-  (* Pad data to multiple of 2880 bytes *)
-  let data_size = width * height * 2 in
-  let padding_size = (2880 - (data_size mod 2880)) mod 2880 in
-  output_string oc (String.make padding_size '\000');
-  
-  close_out oc;
-  
-  Printf.printf "Stacked image saved to %s\n" output_path;
+  Printf.printf "Stacked monochrome image skipped\n";
   flush stdout;
   
   true
